@@ -1,0 +1,130 @@
+// by @troias
+//@version=6
+strategy('Ichimoku Kinko Hyo [Price + Wave + Time] (Hosoda Unified) Sonnet 4.6 Strategy @v6', overlay=true, max_bars_back=500, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.04, slippage=2)
+
+//------------------------------------------------------------
+// INPUTS
+//------------------------------------------------------------
+tenkanLen          = input.int(9,    'Tenkan-sen')
+kijunLen           = input.int(26,   'Kijun-sen')
+senkouLen          = input.int(52,   'Senkou Span B')
+displace           = input.int(26,   'Displacement')
+showTimeCycles     = input.bool(true,  'Show Time Theory Cycles')
+useTimeCycleFilter = input.bool(false, 'Require Time Cycle on Entry')
+useLongOnly        = input.bool(false, 'Long Only')
+useShortOnly       = input.bool(false, 'Short Only')
+atrLen             = input.int(14,   'ATR Length')
+slMult             = input.float(1.5, 'Stop Loss ATR Multiplier', step=0.1)
+tp1Mult            = input.float(2.0, 'Take Profit 1 ATR Mult',  step=0.1)
+tp2Mult            = input.float(4.0, 'Take Profit 2 ATR Mult',  step=0.1)
+
+//------------------------------------------------------------
+// ICHIMOKU CORE
+//------------------------------------------------------------
+tenkan = (ta.highest(high, tenkanLen) + ta.lowest(low, tenkanLen)) / 2
+kijun  = (ta.highest(high, kijunLen)  + ta.lowest(low, kijunLen))  / 2
+spanA  = (tenkan + kijun) / 2
+spanB  = (ta.highest(high, senkouLen) + ta.lowest(low, senkouLen)) / 2
+chikou = close
+
+//------------------------------------------------------------
+// PLOTS
+//------------------------------------------------------------
+plot(tenkan, color=color.red,    title='Tenkan-sen')
+plot(kijun,  color=color.blue,   title='Kijun-sen')
+spanAPlot = plot(spanA, offset=displace, color=color.green,  title='Senkou Span A')
+spanBPlot = plot(spanB, offset=displace, color=color.maroon, title='Senkou Span B')
+fill(spanAPlot, spanBPlot, color=spanA > spanB ? color.new(color.green, 80) : color.new(color.red, 80))
+plot(chikou, offset=-displace, color=color.purple, title='Chikou Span')
+
+//------------------------------------------------------------
+// CHIKOU FREEDOM
+//------------------------------------------------------------
+chikouFreeBull = close > high[displace]
+chikouFreeBear = close < low[displace]
+
+//------------------------------------------------------------
+// PHASE 1-3
+//------------------------------------------------------------
+aboveKumo  = close > math.max(spanA, spanB)
+belowKumo  = close < math.min(spanA, spanB)
+insideKumo = not aboveKumo and not belowKumo
+phaseBull  = aboveKumo and tenkan > kijun
+phaseBear  = belowKumo and tenkan < kijun
+
+//------------------------------------------------------------
+// HOSODA WAVE THEORY
+//------------------------------------------------------------
+nWaveBull = close > kijun and kijun > kijun[1]
+nWaveBear = close < kijun and kijun < kijun[1]
+vWaveBull = ta.lowest(low, 3) == low and close > close[1]
+vWaveBear = ta.highest(high, 3) == high and close < close[1]
+pWave     = insideKumo
+
+waveBullConfirm = nWaveBull or vWaveBull
+waveBearConfirm = nWaveBear or vWaveBear
+
+//------------------------------------------------------------
+// STRENGTHENED PHASE
+//------------------------------------------------------------
+strongBull = phaseBull and waveBullConfirm and chikouFreeBull
+strongBear = phaseBear and waveBearConfirm and chikouFreeBear
+
+//------------------------------------------------------------
+// TIME THEORY CYCLES (HOSODA)
+//------------------------------------------------------------
+isTimeCycle(n) => bar_index % n == 0
+
+timeCycle = isTimeCycle(9) or isTimeCycle(17) or isTimeCycle(26) or isTimeCycle(33) or isTimeCycle(42) or isTimeCycle(65)
+
+plotshape(showTimeCycles and timeCycle, title='Time Theory Cycle', location=location.bottom, style=shape.circle, size=size.tiny, color=color.new(color.blue, 0))
+
+//------------------------------------------------------------
+// ATR
+//------------------------------------------------------------
+atr = ta.atr(atrLen)
+
+//------------------------------------------------------------
+// ENTRY CONDITIONS
+//------------------------------------------------------------
+longCondition  = strongBull and (not useTimeCycleFilter or timeCycle) and not useShortOnly
+shortCondition = strongBear and (not useTimeCycleFilter or timeCycle) and not useLongOnly
+
+//------------------------------------------------------------
+// PHASE VISUALS
+//------------------------------------------------------------
+plotshape(phaseBull, location=location.bottom, style=shape.circle, size=size.tiny, color=strongBull ? color.lime : color.green, title='Phase Bull')
+plotshape(phaseBear, location=location.top,    style=shape.circle, size=size.tiny, color=strongBear ? color.red  : color.maroon, title='Phase Bear')
+plotshape(pWave,     location=location.bottom, style=shape.circle, size=size.tiny, color=color.gray, title='P-Wave (Kumo)')
+
+//------------------------------------------------------------
+// ENTRY & EXIT LOGIC
+//------------------------------------------------------------
+
+// -- LONG --
+if longCondition and strategy.position_size <= 0
+    longSL  = close - atr * slMult
+    longTP1 = close + atr * tp1Mult
+    longTP2 = close + atr * tp2Mult
+    strategy.entry('Long', strategy.long)
+    strategy.exit('Long TP1', 'Long', qty_percent=50,  limit=longTP1, stop=longSL, comment='TP1')
+    strategy.exit('Long TP2', 'Long', qty_percent=100, limit=longTP2, stop=longSL, comment='TP2')
+
+// -- SHORT --
+if shortCondition and strategy.position_size >= 0
+    shortSL  = close + atr * slMult
+    shortTP1 = close - atr * tp1Mult
+    shortTP2 = close - atr * tp2Mult
+    strategy.entry('Short', strategy.short)
+    strategy.exit('Short TP1', 'Short', qty_percent=50,  limit=shortTP1, stop=shortSL, comment='TP1')
+    strategy.exit('Short TP2', 'Short', qty_percent=100, limit=shortTP2, stop=shortSL, comment='TP2')
+
+// -- SIGNAL FLIP CLOSE --
+bearFlip = strategy.position_size > 0 and strongBear
+bullFlip = strategy.position_size < 0 and strongBull
+
+if bearFlip
+    strategy.close('Long', comment='Bear Flip')
+
+if bullFlip
+    strategy.close('Short', comment='Bull Flip')
