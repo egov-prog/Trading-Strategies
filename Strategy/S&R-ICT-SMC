@@ -1,1 +1,1213 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// (c) troias
+//@version=6
+// ================================================================================================== //
+//# * ==============================================================================================
+//# *
+//# * Strategy   : S&R + ICT/SMC Sonnet 4.6 -- ADAPTIVE LEARNING EDITION v2
+//# *
+//# *  All original features preserved:
+//# *    - Support & Resistance (volume & price based)
+//# *    - Volume Spike / Sign of Exhaustion
+//# *    - High Volatility detection
+//# *    - Volume Profile (Bull/Bear dominance, POC, VAH, VAL)
+//# *    - Supply & Demand Zones
+//# *    - Volume Weighted Colored Bars
+//# *
+//# *  ICT / SMC features:
+//# *    - Order Blocks (Bull/Bear) with mitigation & breaker detection
+//# *    - Fair Value Gaps (FVG) with auto-fill tracking
+//# *    - Break of Structure (BOS) & Change of Character (CHoCH)
+//# *    - Liquidity Sweeps (BSL / SSL)
+//# *    - Premium & Discount Zones
+//# *    - Equal Highs / Equal Lows
+//# *    - ICT Kill Zones (Asian, London, NY)
+//# *    - Power of 3 (AMD labels)
+//# *
+//# *  ADAPTIVE LEARNING ENGINE (session-based):
+//# *    - Each signal type tracks its own win/loss within the session
+//# *    - Win = price moved in predicted direction within 5 bars
+//# *    - Confidence score (0-100%) shown on every signal label
+//# *    - Low confidence signals rendered faded/grey automatically
+//# *    - Dynamic threshold adjustment per signal type
+//# *    - Kill Zone performance tracking (best session highlighted)
+//# *    - Adaptive ATR sensitivity based on session volatility
+//# *    - Live Learning Dashboard (top right)
+//# *
+//# *  STRATEGY EXECUTION ENGINE:
+//# *    - Configurable signal triggers (BOS, CHoCH, OB, FVG, Sweep)
+//# *    - Confidence-gated entries (only trade high-confidence signals)
+//# *    - Kill Zone filter (only trade during selected sessions)
+//# *    - Premium/Discount zone filter (long in discount, short in premium)
+//# *    - ATR-based Stop Loss & Take Profit
+//# *    - Risk % per trade position sizing
+//# *
+//# *  NEW (v2) — from validated ChatGPT additions:
+//# *    - HTF Bias Filter (4H SMA 50): long only in bullish bias, short only in bearish
+//# *    - PDH/PDL Sweep Confirmation: require prior day level sweep before entry
+//# *    - Loss Streak Kill Switch: pause trading after N consecutive losses
+//# *    - Dual TP: partial exit at TP1 (50%), full exit at TP2
+//# *    - Dashboard expanded with HTF Bias, PDH/PDL, Loss Streak, Trade Status rows
+//# *
+//# * (c) dgtrd original | ICT/SMC + Adaptive ML: Extended Edition | Strategy: troias
+//# *
+//# * ==============================================================================================
+// ================================================================================================== //
 
+strategy('S&R + ICT/SMC Sonnet 4.6 Adaptive ML STRATEGY v2', 'S&R+ICT Sonnet 4.6 ML v2 ☼☾',
+     overlay            = true,
+     max_bars_back       = 5000,
+     max_lines_count     = 500,
+     max_boxes_count     = 500,
+     max_labels_count    = 500,
+     initial_capital     = 10000,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 10,
+     commission_type     = strategy.commission.percent,
+     commission_value    = 0.05,
+     slippage            = 1,
+     pyramiding          = 0)
+
+// ================================================================================================== //
+// --- ORIGINAL INPUTS --------------------------------------------------------------------------- //
+// ================================================================================================== //
+
+group_support_and_resistance = 'Consecutively Increasing Volume / Price'
+tooltip_support_and_resistance = 'Moments where\n' + '- price is bullish or bearish consecutively for minimum 3 bars and on increasing volume with at least one bar\'s volume is above volume moving average\n' + 'or\n' + '- price is bullish or bearish consecutively on increasing/decreasing price for minimum 3 bars'
+group_volume_spike_sign_of_exhaustion = 'Volume Spike - Sign of Exhaustion'
+tooltip_volume_spike_sign_of_exhaustion = 'Moments where\n' + 'huge volume detected : current volume is grater than the product of the theshold value and volume moving average\n' + 'presents idea : huge volume may be a sign of exhaustion and may lead to sharp reversals'
+group_high_volatility = 'High Volatility'
+tooltip_high_volatility = 'Moments where\n' + 'price range of the current bar is grater than the product of the theshold value and average true range value of defined period'
+group_volume_weighted_colored_bars = 'Volume Weighted Colored Bars'
+tooltip_volume_weighted_colored_bars = 'Colors bars based on the bar\'s volume relative to volume moving average\n' + 'trading tip : a potential breakout trading opportunity may occur when price moves above a resistance level or moves below a support level on increasing volume'
+tooltip_volume_moving_average = 'Volume simple moving average, serves as reference to\n' + '- Support and Resistance,\n' + '- Volume Weighted Colored Bars,\n' + '- Volume Spike - Sign of Exhaustion\ncalculations'
+
+srLookbackRange  = input.string('Visible Range', 'Lookback Range', options = ['Fixed Range', 'Visible Range'])
+i_lenLookback    = input.int(360, 'Fixed Range : Lookback Interval (Bars)', minval = 0, step = 10)
+i_sourceSnR      = input.string('Volume', 'S & R Calculation Source', options = ['Price', 'Volume'], group = group_support_and_resistance, tooltip = tooltip_support_and_resistance)
+i_isSnR          = input.bool(true, 'S & R Lines', inline = 'SR', group = group_support_and_resistance)
+i_srLnColor      = input.color(#4dd0e141, '', inline = 'SR', group = group_support_and_resistance)
+i_srLnWidth      = input.int(3, '', inline = 'SR', group = group_support_and_resistance)
+i_srLnStyle      = input.string('Solid', '', options = ['Dashed', 'Dotted', 'Solid'], inline = 'SR', group = group_support_and_resistance)
+i_vSpikeLb       = input.bool(true, '🚦', inline = 'SRS1', group = group_volume_spike_sign_of_exhaustion, tooltip = tooltip_volume_spike_sign_of_exhaustion)
+i_vSpikeThresh   = input.float(4.669, 'Volume Spike Theshold', minval = .1, step = .1, inline = 'SRS1', group = group_volume_spike_sign_of_exhaustion)
+i_isSnRSpike     = input.bool(true, 'S & R Lines', inline = 'SRS2', group = group_volume_spike_sign_of_exhaustion)
+i_spLnColor      = input.color(#ffb74d69, '', inline = 'SRS2', group = group_volume_spike_sign_of_exhaustion)
+i_spLnWidth      = input.int(3, '', inline = 'SRS2', group = group_volume_spike_sign_of_exhaustion)
+i_spLnStyle      = input.string('Solid', '', options = ['Dashed', 'Dotted', 'Solid'], inline = 'SRS2', group = group_volume_spike_sign_of_exhaustion)
+i_spLnBullLevel  = input.string('Both', 'Levels : Bullish', options = ['High', 'Close', 'Both'], inline = 'SRS3', group = group_volume_spike_sign_of_exhaustion)
+i_spLnBearLevel  = input.string('Both', ' Bearish', options = ['Low', 'Close', 'Both'], inline = 'SRS3', group = group_volume_spike_sign_of_exhaustion)
+i_hATRLb         = input.bool(true, '⚡', inline = 'ATR', group = group_high_volatility, tooltip = tooltip_high_volatility)
+i_atrLength      = input.int(11, 'ATR : Length', inline = 'ATR', group = group_high_volatility)
+i_atrMult        = input.float(2.718, 'Mult', minval = .1, step = .1, inline = 'ATR', group = group_high_volatility)
+i_hATRLn         = input.bool(true, 'S & R Lines', inline = 'AT1', group = group_high_volatility)
+i_hATRLnColor    = input.color(#81c78455, '', inline = 'AT1', group = group_high_volatility)
+i_hATRLnWidth    = input.int(3, '', inline = 'AT1', group = group_high_volatility)
+i_hATRLnStyle    = input.string('Solid', '', options = ['Dashed', 'Dotted', 'Solid'], inline = 'AT1', group = group_high_volatility)
+i_haLnBullLevel  = input.string('Both', 'Levels : Bullish', options = ['High', 'Close', 'Both'], inline = 'AT2', group = group_high_volatility)
+i_haLnBearLevel  = input.string('Both', ' Bearish', options = ['Low', 'Close', 'Both'], inline = 'AT2', group = group_high_volatility)
+
+nzVolume = nz(volume)
+i_vSMA   = ta.sma(nzVolume, input.int(89, 'Volume Moving Average Length', group = 'General Settings', tooltip = tooltip_volume_moving_average))
+
+// ================================================================================================== //
+// --- ICT / SMC INPUTS -------------------------------------------------------------------------- //
+// ================================================================================================== //
+
+group_ict_smc = '=== ICT / SMC Elite Settings ==='
+
+i_showOB          = input.bool(false, 'Order Blocks (OB)', group = group_ict_smc, inline = 'OB')
+i_obLookback      = input.int(10, 'Lookback', minval = 3, maxval = 50, group = group_ict_smc, inline = 'OB')
+i_bullOBColor     = input.color(color.new(#00E5FF, 95), 'Bull OB', group = group_ict_smc, inline = 'OBcol')
+i_bearOBColor     = input.color(color.new(#FF1744, 95), 'Bear OB', group = group_ict_smc, inline = 'OBcol')
+i_showMitigatedOB = input.bool(true, 'Show Mitigated OBs (faded)', group = group_ict_smc)
+i_showFVG         = input.bool(false, 'Fair Value Gaps (FVG)', group = group_ict_smc, inline = 'FVG')
+i_fvgThresh       = input.float(0.0, 'Min Gap %', minval = 0.0, step = 0.1, group = group_ict_smc, inline = 'FVG')
+i_bullFVGColor    = input.color(color.new(#76FF03, 95), 'Bull FVG', group = group_ict_smc, inline = 'FVGcol')
+i_bearFVGColor    = input.color(color.new(#E040FB, 95), 'Bear FVG', group = group_ict_smc, inline = 'FVGcol')
+i_showBOS         = input.bool(true, 'Break of Structure (BOS)', group = group_ict_smc, inline = 'BOS')
+i_showCHoCH       = input.bool(true, '  Change of Character (CHoCH)', group = group_ict_smc, inline = 'BOS')
+i_bosLookback     = input.int(20, 'Structure Lookback', minval = 5, group = group_ict_smc)
+i_bosColor        = input.color(color.new(#2196f3, 0), 'BOS Color', group = group_ict_smc, inline = 'BOScol')
+i_chochColor      = input.color(color.new(#ff9800, 0), 'CHoCH Color', group = group_ict_smc, inline = 'BOScol')
+i_showLiq         = input.bool(true, 'Liquidity Sweeps', group = group_ict_smc, inline = 'LIQ')
+i_liqLookback     = input.int(20, 'Lookback', minval = 5, group = group_ict_smc, inline = 'LIQ')
+i_bslColor        = input.color(color.new(#4caf50, 0), 'BSL Sweep ▲', group = group_ict_smc, inline = 'LIQcol')
+i_sslColor        = input.color(color.new(#f44336, 0), 'SSL Sweep ▼', group = group_ict_smc, inline = 'LIQcol')
+i_showEQ          = input.bool(true, 'Equal Highs / Equal Lows', group = group_ict_smc, inline = 'EQ')
+i_eqThresh        = input.float(0.05, 'Tolerance %', minval = 0.01, step = 0.01, group = group_ict_smc, inline = 'EQ')
+i_eqhColor        = input.color(color.new(#4caf50, 20), 'EQH', group = group_ict_smc, inline = 'EQcol')
+i_eqlColor        = input.color(color.new(#f44336, 20), 'EQL', group = group_ict_smc, inline = 'EQcol')
+i_showPD          = input.bool(true, 'Premium / Discount Zones', group = group_ict_smc)
+i_pdLookback      = input.int(50, 'PD Swing Lookback', minval = 10, group = group_ict_smc)
+i_premColor       = input.color(color.new(#e91e63, 88), 'Premium Zone', group = group_ict_smc, inline = 'PDcol')
+i_discColor       = input.color(color.new(#26a69a, 88), 'Discount Zone', group = group_ict_smc, inline = 'PDcol')
+i_eqColor         = input.color(color.new(#9c27b0, 88), 'Equilibrium', group = group_ict_smc, inline = 'PDcol')
+i_showKZ          = input.bool(true, 'ICT Kill Zones', group = group_ict_smc)
+i_kzTimezone      = input.string('UTC+0', 'Timezone', options = ['UTC-4', 'UTC-5', 'UTC+0', 'UTC+1', 'UTC+2', 'UTC+3', 'UTC+8'], group = group_ict_smc)
+i_asianKZColor    = input.color(color.new(#9c27b0, 88), 'Asian KZ', group = group_ict_smc, inline = 'KZcol')
+i_londonKZColor   = input.color(color.new(#2196f3, 88), 'London KZ', group = group_ict_smc, inline = 'KZcol')
+i_nyKZColor       = input.color(color.new(#ff9800, 88), 'NY KZ', group = group_ict_smc, inline = 'KZcol')
+i_showPO3         = input.bool(false, 'Power of 3 Labels (AMD)', group = group_ict_smc)
+i_showBB          = input.bool(true, 'Breaker Blocks', group = group_ict_smc)
+i_bullBBColor     = input.color(color.new(#00bcd4, 88), 'Bull Breaker', group = group_ict_smc, inline = 'BBcol')
+i_bearBBColor     = input.color(color.new(#e91e63, 88), 'Bear Breaker', group = group_ict_smc, inline = 'BBcol')
+
+// ================================================================================================== //
+// --- ADAPTIVE LEARNING INPUTS ------------------------------------------------------------------ //
+// ================================================================================================== //
+
+group_adaptive = '=== Adaptive Learning Engine ==='
+
+i_showAdaptive    = input.bool(true,  'Enable Adaptive Learning',         group = group_adaptive)
+i_lowConfThresh   = input.int(40,     'Low Confidence Threshold %',       group = group_adaptive, minval = 10, maxval = 60, tooltip = 'Signals below this score are shown faded/grey')
+i_highConfThresh  = input.int(70,     'High Confidence Threshold %',      group = group_adaptive, minval = 50, maxval = 95, tooltip = 'Signals above this score are shown brightly')
+i_showConfLabel   = input.bool(false, 'Show Confidence % on Labels',      group = group_adaptive)
+i_showLearnDash   = input.bool(true,  'Show Learning Dashboard',          group = group_adaptive)
+i_adaptiveATR     = input.bool(true,  'Adaptive ATR Sensitivity',         group = group_adaptive)
+
+// ================================================================================================== //
+// --- STRATEGY EXECUTION INPUTS ----------------------------------------------------------------- //
+// ================================================================================================== //
+
+group_strat = '=== Strategy Execution Settings ==='
+
+i_useBOS          = input.bool(true,  'Enter on BOS',                     group = group_strat, inline = 'sig1')
+i_useCHoCH        = input.bool(true,  'Enter on CHoCH',                   group = group_strat, inline = 'sig1')
+i_useOB           = input.bool(true,  'Enter on Order Block',             group = group_strat, inline = 'sig2')
+i_useFVG          = input.bool(false, 'Enter on FVG',                     group = group_strat, inline = 'sig2')
+i_useSweep        = input.bool(false, 'Enter on Liquidity Sweep',         group = group_strat, inline = 'sig3')
+i_confGate        = input.bool(true,  'Require High Confidence to Enter', group = group_strat, tooltip = 'Only enter trades when adaptive confidence >= High Confidence Threshold')
+i_kzFilter        = input.bool(true,  'Kill Zone Filter (trade in KZ only)', group = group_strat, inline = 'kz')
+i_kzAsian         = input.bool(false, 'Asian',                            group = group_strat, inline = 'kz')
+i_kzLondon        = input.bool(true,  'London',                           group = group_strat, inline = 'kz')
+i_kzNY            = input.bool(true,  'NY',                               group = group_strat, inline = 'kz')
+i_pdFilter        = input.bool(true,  'PD Zone Filter (Long in Discount, Short in Premium)', group = group_strat)
+i_slATR           = input.float(1.5,  'Stop Loss (ATR x)',                group = group_strat, minval = 0.1, step = 0.1)
+i_tpATR           = input.float(3.0,  'Take Profit (ATR x)',              group = group_strat, minval = 0.1, step = 0.1)
+i_trailSL         = input.bool(false, 'Use Trailing Stop',                group = group_strat)
+i_trailATR        = input.float(1.0,  'Trail Offset (ATR x)',             group = group_strat, minval = 0.1, step = 0.1)
+
+// ================================================================================================== //
+// --- NEW v2 INPUTS: HTF BIAS + PDH/PDL SWEEP + LOSS STREAK + DUAL TP -------------------------- //
+// ================================================================================================== //
+
+group_v2 = '=== v2 Enhancements ==='
+
+i_useHTFBias      = input.bool(true,  'HTF Bias Filter (4H SMA 50)',      group = group_v2, tooltip = 'Only long when 4H close > 4H SMA50 (bullish bias), only short when below (bearish bias)')
+i_usePDHPDL       = input.bool(true,  'Require PDH/PDL Sweep Before Entry', group = group_v2, tooltip = 'Only enter after price has swept prior day high (for shorts) or prior day low (for longs)')
+i_useLossStreak   = input.bool(true,  'Loss Streak Kill Switch',          group = group_v2, tooltip = 'Pause all entries after N consecutive losses')
+i_maxLossStreak   = input.int(3,      'Max Consecutive Losses',           group = group_v2, minval = 1, maxval = 10)
+i_useDualTP       = input.bool(true,  'Dual Take Profit (TP1 + TP2)',     group = group_v2, tooltip = 'Exit 50% at TP1, remainder at TP2')
+i_tp1ATR          = input.float(1.5,  'TP1 (ATR x)',                      group = group_v2, minval = 0.1, step = 0.1)
+i_tp2ATR          = input.float(3.0,  'TP2 (ATR x)',                      group = group_v2, minval = 0.1, step = 0.1)
+
+// ================================================================================================== //
+// --- BASE CALCULATIONS ------------------------------------------------------------------------- //
+// ================================================================================================== //
+
+risingVol    = nzVolume >= nzVolume[1]
+bullCandle   = close > open
+bearCandle   = close < open
+risingPrice  = close > close[1]
+fallingPrice = close < close[1]
+lwstPrice    = ta.lowest(low, 3)
+hstPrice     = ta.highest(high, 3)
+
+// Adaptive ATR
+baseATR      = ta.atr(i_atrLength)
+sessionATR   = ta.sma(baseATR, 20)
+atrRatio     = baseATR / math.max(sessionATR, 0.000001)
+adaptiveMult = i_adaptiveATR ? i_atrMult * math.max(0.8, math.min(1.5, atrRatio)) : i_atrMult
+weightedATR  = adaptiveMult * baseATR
+
+range_1      = math.abs(high - low)
+x2           = timenow + 7 * math.round(ta.change(time))
+
+var sProcessing = false
+if srLookbackRange == 'Visible Range'
+    sProcessing := time >= chart.left_visible_bar_time
+    sProcessing
+else
+    sProcessing := time > timenow - i_lenLookback * (timeframe.isintraday ? timeframe.multiplier * 86400000 / 1440 : timeframe.multiplier * 86400000)
+    sProcessing
+
+falling = if i_sourceSnR == 'Volume'
+    bearCandle and bearCandle[1] and bearCandle[2] and nzVolume > i_vSMA and risingVol and risingVol[1]
+else
+    bearCandle and bearCandle[1] and bearCandle[2] and fallingPrice and fallingPrice[1] and fallingPrice[2]
+
+rising = if i_sourceSnR == 'Volume'
+    bullCandle and bullCandle[1] and bullCandle[2] and nzVolume > i_vSMA and risingVol and risingVol[1]
+else
+    bullCandle and bullCandle[1] and bullCandle[2] and risingPrice and risingPrice[1] and risingPrice[2]
+
+y    = ta.valuewhen(falling or rising, falling ? lwstPrice : hstPrice, 0)
+x1   = ta.valuewhen(falling or rising, time, 0)
+
+exhaustVol     = nzVolume > i_vSpikeThresh * i_vSMA
+x1V            = ta.valuewhen(exhaustVol, time, 0)
+highVolatility = range_1 > weightedATR
+x1hV           = ta.valuewhen(highVolatility, time, 0)
+
+f_getStyle(_s) =>
+    _s == 'Solid' ? line.style_solid : _s == 'Dotted' ? line.style_dotted : line.style_dashed
+
+// ================================================================================================== //
+// --- NEW v2: HTF BIAS (4H SMA 50) ------------------------------------------------------------- //
+// ================================================================================================== //
+
+htf_close  = request.security(syminfo.tickerid, '240', close)
+htf_sma50  = request.security(syminfo.tickerid, '240', ta.sma(close, 50))
+
+htfBullish = htf_close > htf_sma50
+htfBearish = htf_close < htf_sma50
+
+// ================================================================================================== //
+// --- NEW v2: PDH / PDL -------------------------------------------------------------------- //
+// ================================================================================================== //
+
+pdh = request.security(syminfo.tickerid, 'D', high[1])
+pdl = request.security(syminfo.tickerid, 'D', low[1])
+
+// Track whether PDH/PDL has been swept since last daily open
+// Swept = price exceeded the level on current day. Reset at day start.
+var bool pdhSweptToday = false
+var bool pdlSweptToday = false
+
+if ta.change(time('D')) != 0
+    pdhSweptToday := false
+    pdlSweptToday := false
+
+if high > pdh
+    pdhSweptToday := true
+if low < pdl
+    pdlSweptToday := true
+
+// ================================================================================================== //
+// --- NEW v2: LOSS STREAK KILL SWITCH ---------------------------------------------------------- //
+// ================================================================================================== //
+
+var int lossStreakCount  = 0
+var int prevLossTrades   = 0
+var int prevWinTrades    = 0
+
+// Detect a new loss (loss count increased since last bar)
+newLoss = strategy.losstrades > prevLossTrades
+newWin  = strategy.wintrades  > prevWinTrades
+
+if newLoss
+    lossStreakCount := lossStreakCount + 1
+if newWin
+    lossStreakCount := 0
+
+prevLossTrades := strategy.losstrades
+prevWinTrades  := strategy.wintrades
+
+canTrade = not i_useLossStreak or lossStreakCount < i_maxLossStreak
+
+// ================================================================================================== //
+// --- ADAPTIVE LEARNING ENGINE ------------------------------------------------------------------ //
+// ================================================================================================== //
+
+// Signal indices: 0=BOS, 1=CHoCH, 2=OB, 3=FVG, 4=LIQ, 5=KZ_Asian, 6=KZ_London, 7=KZ_NY
+var array<float> sig_wins  = array.new_float(8, 0.)
+var array<float> sig_total = array.new_float(8, 0.)
+
+var array<int>   pend_bar   = array.new_int(8,   -999)
+var array<float> pend_price = array.new_float(8, 0.)
+var array<int>   pend_dir   = array.new_int(8,   0)
+
+EVAL_BARS = 5
+
+f_confidence(idx) =>
+    t = array.get(sig_total, idx)
+    t < 3 ? 0.5 : array.get(sig_wins, idx) / t
+
+f_record(idx, direction) =>
+    array.set(pend_bar,   idx, bar_index)
+    array.set(pend_price, idx, close)
+    array.set(pend_dir,   idx, direction)
+    array.set(sig_total,  idx, array.get(sig_total, idx) + 1)
+
+f_evaluate() =>
+    for idx = 0 to 7
+        pb = array.get(pend_bar, idx)
+        if pb >= 0 and bar_index - pb == EVAL_BARS
+            entry   = array.get(pend_price, idx)
+            dir     = array.get(pend_dir, idx)
+            won     = dir == 1 ? close > entry : close < entry
+            if won
+                array.set(sig_wins, idx, array.get(sig_wins, idx) + 1)
+            array.set(pend_bar, idx, -999)
+
+f_evaluate()
+
+f_labelColor(baseColor, confScore) =>
+    confScore >= i_highConfThresh / 100.0 ? baseColor :
+     confScore >= i_lowConfThresh  / 100.0 ? color.new(baseColor, 55) :
+     color.new(color.gray, 75)
+
+f_boxColor(baseColor, confScore) =>
+    confScore >= i_highConfThresh / 100.0 ? baseColor :
+     confScore >= i_lowConfThresh  / 100.0 ? color.new(baseColor, 85) :
+     color.new(color.gray, 92)
+
+f_confStr(confScore, total) =>
+    total < 3 ? ' [new]' : ' [' + str.tostring(math.round(confScore * 100)) + '%]'
+
+// ================================================================================================== //
+// --- ORIGINAL S&R PLOTTING --------------------------------------------------------------------- //
+// ================================================================================================== //
+
+var line srLine = na
+if i_isSnR and falling and sProcessing
+    if falling == falling[1]
+        line.delete(srLine[1])
+    srLine := line.new(x1, y, x2, y, xloc.bar_time, extend.none, i_srLnColor, f_getStyle(i_srLnStyle), i_srLnWidth)
+    srLine
+
+if i_isSnR and rising and sProcessing
+    if rising == rising[1]
+        line.delete(srLine[1])
+    srLine := line.new(x1, y, x2, y, xloc.bar_time, extend.none, i_srLnColor, f_getStyle(i_srLnStyle), i_srLnWidth)
+    srLine
+
+var line spikeLine  = na
+var line spikeLine1 = na
+var line spikeLine2 = na
+var line spikeLine3 = na
+
+if i_isSnRSpike and exhaustVol and sProcessing
+    if bullCandle
+        if i_spLnBullLevel == 'High'
+            if exhaustVol == exhaustVol[1] and not bearCandle[1]
+                line.delete(spikeLine[1])
+            spikeLine := line.new(x1V, high, x2, high, xloc.bar_time, extend.none, i_spLnColor, f_getStyle(i_spLnStyle), i_spLnWidth)
+            spikeLine
+        else if i_spLnBullLevel == 'Close'
+            if exhaustVol == exhaustVol[1] and not bearCandle[1]
+                line.delete(spikeLine[1])
+            spikeLine := line.new(x1V, close, x2, close, xloc.bar_time, extend.none, i_spLnColor, f_getStyle(i_spLnStyle), i_spLnWidth)
+            spikeLine
+        else
+            if exhaustVol == exhaustVol[1] and not bearCandle[1]
+                line.delete(spikeLine1[1])
+                line.delete(spikeLine2[1])
+                line.delete(spikeLine3[1])
+            spikeLine1 := line.new(x1V, close, x2, close, xloc.bar_time, extend.none, i_spLnColor, f_getStyle(i_spLnStyle), i_spLnWidth)
+            spikeLine2 := line.new(x1V, math.avg(high, close), x2, math.avg(high, close), xloc.bar_time, extend.none, i_spLnColor, f_getStyle('Dotted'), i_spLnWidth - 1)
+            spikeLine3 := line.new(x1V, high, x2, high, xloc.bar_time, extend.none, i_spLnColor, f_getStyle(i_spLnStyle), i_spLnWidth)
+            spikeLine3
+
+    if bearCandle
+        if i_spLnBearLevel == 'Low'
+            if exhaustVol == exhaustVol[1] and not bullCandle[1]
+                line.delete(spikeLine[1])
+            spikeLine := line.new(x1V, low, x2, low, xloc.bar_time, extend.none, i_spLnColor, f_getStyle(i_spLnStyle), i_spLnWidth)
+            spikeLine
+        else if i_spLnBearLevel == 'Close'
+            if exhaustVol == exhaustVol[1] and not bullCandle[1]
+                line.delete(spikeLine[1])
+            spikeLine := line.new(x1V, close, x2, close, xloc.bar_time, extend.none, i_spLnColor, f_getStyle(i_spLnStyle), i_spLnWidth)
+            spikeLine
+        else
+            if exhaustVol == exhaustVol[1] and not bullCandle[1]
+                line.delete(spikeLine1[1])
+                line.delete(spikeLine2[1])
+                line.delete(spikeLine3[1])
+            spikeLine1 := line.new(x1V, low, x2, low, xloc.bar_time, extend.none, i_spLnColor, f_getStyle(i_spLnStyle), i_spLnWidth)
+            spikeLine2 := line.new(x1V, math.avg(low, close), x2, math.avg(low, close), xloc.bar_time, extend.none, i_spLnColor, f_getStyle('Dotted'), i_spLnWidth - 1)
+            spikeLine3 := line.new(x1V, close, x2, close, xloc.bar_time, extend.none, i_spLnColor, f_getStyle(i_spLnStyle), i_spLnWidth)
+            spikeLine3
+
+var line volatileLine  = na
+var line volatileLine1 = na
+var line volatileLine2 = na
+var line volatileLine3 = na
+
+if i_hATRLn and highVolatility and sProcessing
+    if bullCandle
+        if i_haLnBullLevel == 'High'
+            if highVolatility == highVolatility[1] and not bearCandle[1]
+                line.delete(volatileLine[1])
+            volatileLine := line.new(x1hV, high, x2, high, xloc.bar_time, extend.none, i_hATRLnColor, f_getStyle(i_hATRLnStyle), i_hATRLnWidth)
+            volatileLine
+        else if i_haLnBullLevel == 'Close'
+            if highVolatility == highVolatility[1] and not bearCandle[1]
+                line.delete(volatileLine[1])
+            volatileLine := line.new(x1hV, close, x2, close, xloc.bar_time, extend.none, i_hATRLnColor, f_getStyle(i_hATRLnStyle), i_hATRLnWidth)
+            volatileLine
+        else
+            if highVolatility == highVolatility[1] and not bearCandle[1]
+                line.delete(volatileLine1[1])
+                line.delete(volatileLine2[1])
+                line.delete(volatileLine3[1])
+            volatileLine1 := line.new(x1hV, close, x2, close, xloc.bar_time, extend.none, i_hATRLnColor, f_getStyle(i_hATRLnStyle), i_hATRLnWidth)
+            volatileLine2 := line.new(x1hV, math.avg(high, close), x2, math.avg(high, close), xloc.bar_time, extend.none, i_hATRLnColor, f_getStyle('Dotted'), i_hATRLnWidth - 1)
+            volatileLine3 := line.new(x1hV, high, x2, high, xloc.bar_time, extend.none, i_hATRLnColor, f_getStyle(i_hATRLnStyle), i_hATRLnWidth)
+            volatileLine3
+
+    if bearCandle
+        if i_haLnBearLevel == 'Low'
+            if highVolatility == highVolatility[1] and not bullCandle[1]
+                line.delete(volatileLine[1])
+            volatileLine := line.new(x1hV, low, x2, low, xloc.bar_time, extend.none, i_hATRLnColor, f_getStyle(i_hATRLnStyle), i_hATRLnWidth)
+            volatileLine
+        else if i_haLnBearLevel == 'Close'
+            if highVolatility == highVolatility[1] and not bullCandle[1]
+                line.delete(volatileLine[1])
+            volatileLine := line.new(x1hV, close, x2, close, xloc.bar_time, extend.none, i_hATRLnColor, f_getStyle(i_hATRLnStyle), i_hATRLnWidth)
+            volatileLine
+        else
+            if highVolatility == highVolatility[1] and not bullCandle[1]
+                line.delete(volatileLine1[1])
+                line.delete(volatileLine2[1])
+                line.delete(volatileLine3[1])
+            volatileLine1 := line.new(x1hV, low, x2, low, xloc.bar_time, extend.none, i_hATRLnColor, f_getStyle(i_hATRLnStyle), i_hATRLnWidth)
+            volatileLine2 := line.new(x1hV, math.avg(low, close), x2, math.avg(low, close), xloc.bar_time, extend.none, i_hATRLnColor, f_getStyle('Dotted'), i_hATRLnWidth - 1)
+            volatileLine3 := line.new(x1hV, close, x2, close, xloc.bar_time, extend.none, i_hATRLnColor, f_getStyle(i_hATRLnStyle), i_hATRLnWidth)
+            volatileLine3
+
+plotchar(i_hATRLb and sProcessing ? highVolatility : false, 'High Volatile Bar', '⚡', location.belowbar, size = size.tiny)
+
+// ================================================================================================== //
+// --- VOLUME PROFILE ---------------------------------------------------------------------------- //
+// ================================================================================================== //
+
+f_drawLabelX(_x, _y, _text, _xloc, _yloc, _color, _style, _textcolor, _size, _textalign, _tooltip) =>
+    var id = label.new(_x, _y, _text, _xloc, _yloc, _color, _style, _textcolor, _size, _textalign, _tooltip)
+    label.set_xy(id, _x, _y)
+    label.set_text(id, _text)
+    label.set_tooltip(id, _tooltip)
+    label.set_textcolor(id, _textcolor)
+
+f_drawLineX(_x1, _y1, _x2, _y2, _xloc, _extend, _color, _style, _width) =>
+    var id = line.new(_x1, _y1, _x2, _y2, _xloc, _extend, _color, _style, _width)
+    line.set_xy1(id, _x1, _y1)
+    line.set_xy2(id, _x2, _y2)
+    line.set_color(id, _color)
+
+group_volume_profile   = 'Volume Profile / Price by Volume'
+tooltip_volume_profile = 'Volume Profile (also known as Price by Volume) is an charting study that displays trading activity over a specified time period at specific price levels'
+
+volumeProfile    = input.bool(true, 'Volume Profile', group = group_volume_profile, tooltip = tooltip_volume_profile)
+vpLookbackRange  = input.string('Visible Range', 'VP and SD Lookback Range', options = ['Fixed Range', 'Visible Range'], group = group_volume_profile)
+lookbackLength   = input.int(360, 'VP and SD Fixed Range : Lookback Length', minval = 10, maxval = 5000, step = 10, group = group_volume_profile)
+avgVolNodeCol    = input.color(color.new(#787b86, 25), 'Volume Nodes : AVN', inline = 'col', group = group_volume_profile)
+highVolNodeCol   = input.color(color.new(#f57c00, 50), 'HVN', inline = 'col', group = group_volume_profile)
+lowVolNodeCol    = input.color(color.new(#787b86, 75), 'LVN', inline = 'col', group = group_volume_profile)
+isValueArea      = input.float(68, 'Value Area Volume %', minval = 0, maxval = 100, group = group_volume_profile) / 100
+valueAreaHigh    = input.bool(true, 'VAH', inline = 'VA', group = group_volume_profile)
+vahColor         = input.color(color.new(#ffeb3b, 0), '', inline = 'VA', group = group_volume_profile)
+pointOfControl   = input.bool(true, 'POC', inline = 'VA', group = group_volume_profile)
+pocColor         = input.color(color.new(#ff0000, 0), '', inline = 'VA', group = group_volume_profile)
+valueAreaLow     = input.bool(true, 'VAL', inline = 'VA', group = group_volume_profile)
+valColor         = input.color(color.new(#ffeb3b, 0), '', inline = 'VA', group = group_volume_profile)
+priceLevels      = input.bool(true, 'Show Profile Price Levels     ', inline = 'BBe', group = group_volume_profile)
+labelColor       = input.color(color.new(#8c92a4, 0), '', inline = 'BBe', group = group_volume_profile)
+profileLevels    = input.int(100, 'Number of Rows', minval = 10, maxval = 170, step = 10, group = group_volume_profile)
+horizontalOffset = input.int(13, 'Horizontal Offset', minval = 0, maxval = 100, group = group_volume_profile)
+
+tooltip_sd       = 'Defines the relationship between the price of a given asset and the willingness of traders to either buy or sell it'
+group_supply_demand = 'Supply and Demand Settings'
+supplyDemand     = input.bool(true, 'Supply and Demand Zones', inline = 'low2', group = group_supply_demand, tooltip = tooltip_sd)
+lowVolNodesVal   = input.int(15, '', minval = 0, maxval = 50, step = 1, inline = 'low2', group = group_supply_demand) / 100
+supplyDemandCol  = input.color(color.new(#512da8, 80), '', inline = 'low2', group = group_supply_demand)
+
+priceHighestFR = ta.highest(high, lookbackLength)
+priceLowestFR  = ta.lowest(low, lookbackLength)
+
+var startBarIndexX = 0
+if time == chart.left_visible_bar_time
+    startBarIndexX := bar_index
+    startBarIndexX
+
+if vpLookbackRange == 'Visible Range'
+    lookbackLength := last_bar_index - startBarIndexX
+    lookbackLength
+
+f_getHighLow() =>
+    var htf_h = 0.
+    var htf_l = 0.
+    if vpLookbackRange == 'Visible Range'
+        if time == chart.left_visible_bar_time
+            htf_l := low
+            htf_h := high
+            htf_h
+        else if time > chart.left_visible_bar_time
+            htf_l := math.min(low, htf_l)
+            htf_h := math.max(high, htf_h)
+            htf_h
+    else
+        htf_h := priceHighestFR
+        htf_l := priceLowestFR
+        htf_l
+    [htf_h, htf_l]
+
+[priceHighest, priceLowest] = f_getHighLow()
+priceStep      = (priceHighest - priceLowest) / profileLevels
+barPriceLow    = low
+barPriceHigh   = high
+var levelAbovePoc = 0
+var levelBelowPoc = 0
+var pocLevel      = 0
+
+volumeStorage  = array.new_float(profileLevels + 1, 0.)
+volumeStorageB = array.new_float(profileLevels + 1, 0.)
+var a_profile  = array.new_box()
+
+if barstate.islast and not na(nzVolume)
+    if array.size(a_profile) > 0
+        for i = 1 to array.size(a_profile) by 1
+            box.delete(array.shift(a_profile))
+
+    for barIndex = 0 to lookbackLength - 1 by 1
+        level = 0
+        for priceLevel = priceLowest to priceHighest by priceStep
+            if barPriceHigh[barIndex] >= priceLevel and barPriceLow[barIndex] < priceLevel + priceStep
+                array.set(volumeStorage, level, array.get(volumeStorage, level) + nzVolume[barIndex] * (barPriceHigh[barIndex] - barPriceLow[barIndex] == 0 ? 1 : priceStep / (barPriceHigh[barIndex] - barPriceLow[barIndex])))
+                if bullCandle[barIndex]
+                    array.set(volumeStorageB, level, array.get(volumeStorageB, level) + nzVolume[barIndex] * (barPriceHigh[barIndex] - barPriceLow[barIndex] == 0 ? 1 : priceStep / (barPriceHigh[barIndex] - barPriceLow[barIndex])))
+            level := level + 1
+            level
+
+    pocLevel          := array.indexof(volumeStorage, array.max(volumeStorage))
+    totalVolumeTraded  = array.sum(volumeStorage) * isValueArea
+    valueArea          = array.get(volumeStorage, pocLevel)
+    levelAbovePoc     := pocLevel
+    levelBelowPoc     := pocLevel
+
+    while valueArea < totalVolumeTraded
+        if levelBelowPoc == 0 and levelAbovePoc == profileLevels - 1
+            break
+        volumeAbovePoc = 0.
+        if levelAbovePoc < profileLevels - 1
+            volumeAbovePoc := array.get(volumeStorage, levelAbovePoc + 1)
+            volumeAbovePoc
+        volumeBelowPoc = 0.
+        if levelBelowPoc > 0
+            volumeBelowPoc := array.get(volumeStorage, levelBelowPoc - 1)
+            volumeBelowPoc
+        if volumeAbovePoc >= volumeBelowPoc
+            valueArea     := valueArea + volumeAbovePoc
+            levelAbovePoc := levelAbovePoc + 1
+            levelAbovePoc
+        else
+            valueArea     := valueArea + volumeBelowPoc
+            levelBelowPoc := levelBelowPoc - 1
+            levelBelowPoc
+
+    f_drawLineX(bar_index - lookbackLength + 1, priceLowest + (levelAbovePoc + 1.00) * priceStep, volumeProfile ? bar_index + horizontalOffset + 50 : bar_index + 7, priceLowest + (levelAbovePoc + 1.00) * priceStep, xloc.bar_index, extend.none, valueAreaHigh ? vahColor : #00000000, line.style_solid, 2)
+    f_drawLineX(bar_index - lookbackLength + 1, priceLowest + (pocLevel + 0.50) * priceStep, volumeProfile ? bar_index + horizontalOffset + 50 : bar_index + 7, priceLowest + (pocLevel + 0.50) * priceStep, xloc.bar_index, extend.none, pointOfControl ? pocColor : #00000000, line.style_solid, 2)
+    f_drawLineX(bar_index - lookbackLength + 1, priceLowest + (levelBelowPoc + 0.00) * priceStep, volumeProfile ? bar_index + horizontalOffset + 50 : bar_index + 7, priceLowest + (levelBelowPoc + 0.00) * priceStep, xloc.bar_index, extend.none, valueAreaLow ? valColor : #00000000, line.style_solid, 2)
+
+    if priceLevels
+        f_drawLabelX(volumeProfile ? bar_index + horizontalOffset + 50 : bar_index + 7, priceHighest, str.tostring(priceHighest, format.mintick), xloc.bar_index, yloc.price, color.new(labelColor, 89), label.style_label_down, labelColor, size.normal, text.align_left, 'Profile High - during last ' + str.tostring(lookbackLength) + ' bars\n %' + str.tostring((priceHighest - priceLowest) / priceLowest * 100, '#.##') + ' higher than the Profile Low')
+        f_drawLabelX(volumeProfile ? bar_index + horizontalOffset + 50 : bar_index + 7, priceLowest, str.tostring(priceLowest, format.mintick), xloc.bar_index, yloc.price, color.new(labelColor, 89), label.style_label_up, labelColor, size.normal, text.align_left, 'Profile Low - during last ' + str.tostring(lookbackLength) + ' bars\n %' + str.tostring((priceHighest - priceLowest) / priceHighest * 100, '#.##') + ' lower than the Profile High')
+        f_drawLabelX(volumeProfile ? bar_index + horizontalOffset + 57 : bar_index + 13, priceLowest + (levelAbovePoc + 1.00) * priceStep, str.tostring(priceLowest + (levelAbovePoc + 1.00) * priceStep, format.mintick), xloc.bar_index, yloc.price, valueAreaHigh ? color.new(labelColor, 89) : #00000000, label.style_label_left, valueAreaHigh ? labelColor : #00000000, size.normal, text.align_left, 'Value Area High Price')
+        f_drawLabelX(volumeProfile ? bar_index + horizontalOffset + 57 : bar_index + 13, priceLowest + (pocLevel + 0.50) * priceStep, str.tostring(priceLowest + (pocLevel + 0.50) * priceStep, format.mintick), xloc.bar_index, yloc.price, pointOfControl ? color.new(labelColor, 89) : #00000000, label.style_label_left, pointOfControl ? labelColor : #00000000, size.normal, text.align_left, 'Point Of Control Price')
+        f_drawLabelX(volumeProfile ? bar_index + horizontalOffset + 57 : bar_index + 13, priceLowest + (levelBelowPoc + 0.00) * priceStep, str.tostring(priceLowest + (levelBelowPoc + 0.00) * priceStep, format.mintick), xloc.bar_index, yloc.price, valueAreaLow ? color.new(labelColor, 89) : #00000000, label.style_label_left, valueAreaLow ? labelColor : #00000000, size.normal, text.align_left, 'Value Area Low Price')
+
+    for level = 0 to profileLevels - 1 by 1
+        if volumeProfile
+            levelColor = array.get(volumeStorage, level) / array.max(volumeStorage) > .8 ? highVolNodeCol : array.get(volumeStorage, level) / array.max(volumeStorage) < .2 ? lowVolNodeCol : avgVolNodeCol
+            array.push(a_profile, box.new(bar_index + horizontalOffset + 49 - int(array.get(volumeStorage, level) / array.max(volumeStorage) * 41), priceLowest + (level + 0.25) * priceStep, bar_index + horizontalOffset + 50, priceLowest + (level + 0.75) * priceStep, levelColor, bgcolor = levelColor))
+            bullBearPower = 2 * array.get(volumeStorageB, level) - array.get(volumeStorage, level)
+            array.push(a_profile, box.new(bar_index + horizontalOffset + 51, priceLowest + (level + 0.25) * priceStep, bar_index + horizontalOffset + 51 + (bullBearPower > 0 ? 1 : -1) * int(bullBearPower / array.max(volumeStorage) * 73), priceLowest + (level + 0.75) * priceStep, bullBearPower > 0 ? color.new(#26a69a, 50) : color.new(#ef5350, 50), bgcolor = bullBearPower > 0 ? color.new(#26a69a, 50) : color.new(#ef5350, 50)))
+
+        if supplyDemand
+            if array.get(volumeStorage, level) / array.max(volumeStorage) < lowVolNodesVal
+                array.push(a_profile, box.new(bar_index - lookbackLength + 1, priceLowest + (level + 0.00) * priceStep, bar_index + 7, priceLowest + (level + 1.00) * priceStep, #00000000, bgcolor = supplyDemandCol))
+
+    if volumeProfile
+        array.push(a_profile, box.new(bar_index - lookbackLength + 1, priceLowest, bar_index + horizontalOffset + 50, priceHighest, color.new(color.gray, 37), 1, line.style_dotted, bgcolor = #00000000))
+
+i_vwcb           = input.bool(true, '', inline = 'VWC', group = group_volume_weighted_colored_bars, tooltip = tooltip_volume_weighted_colored_bars)
+i_vwcbHighThresh = input.float(1.618, 'Thesholds : High ', minval = 1., step = .1, inline = 'VWC', group = group_volume_weighted_colored_bars)
+i_vwcbLowThresh  = input.float(0.618, 'Low', minval = .1, step = .1, inline = 'VWC', group = group_volume_weighted_colored_bars)
+vwcbCol = nzVolume > i_vSMA * i_vwcbHighThresh ? bearCandle ? #910000 : #006400 : nzVolume < i_vSMA * i_vwcbLowThresh ? bearCandle ? #FF9800 : #7FFFD4 : na
+barcolor(i_vwcb and not na(nzVolume) ? vwcbCol : na, title = 'Volume Weighted Colored Bars')
+
+// ================================================================================================== //
+// --- ICT / SMC ENGINE ------------------------------------------------------------------ //
+// ================================================================================================== //
+
+// ---- 1. FAIR VALUE GAPS -----------------------------------------------------------------------
+
+fvgMinSize = i_fvgThresh / 100
+bullFVG    = i_showFVG and low > high[2] and close[1] > open[1] and (low - high[2]) / high[2] >= fvgMinSize
+bearFVG    = i_showFVG and high < low[2] and close[1] < open[1] and (low[2] - high) / low[2] >= fvgMinSize
+
+conf_FVG    = f_confidence(3)
+total_FVG   = array.get(sig_total, 3)
+
+var array<box> fvgBoxes = array.new_box()
+
+if bullFVG
+    fvgTop    = low
+    fvgBottom = high[2]
+    boxCol    = i_showAdaptive ? f_boxColor(i_bullFVGColor, conf_FVG) : i_bullFVGColor
+    newBox    = box.new(bar_index - 2, fvgTop, bar_index + 20, fvgBottom, border_color = color.new(#76FF03, 80), bgcolor = boxCol)
+    array.push(fvgBoxes, newBox)
+    if array.size(fvgBoxes) > 5
+        box.delete(array.shift(fvgBoxes))
+    lblText   = i_showConfLabel and i_showAdaptive ? 'FVG' + f_confStr(conf_FVG, total_FVG) : 'FVG'
+    label.new(bar_index - 1, math.avg(fvgTop, fvgBottom), lblText, style = label.style_label_right, color = color.new(#76FF03, 85), textcolor = #76FF03, size = size.tiny)
+    f_record(3, 1)
+
+if bearFVG
+    fvgTop    = low[2]
+    fvgBottom = high
+    boxCol    = i_showAdaptive ? f_boxColor(i_bearFVGColor, conf_FVG) : i_bearFVGColor
+    newBox    = box.new(bar_index - 2, fvgTop, bar_index + 20, fvgBottom, border_color = color.new(#E040FB, 80), bgcolor = boxCol)
+    array.push(fvgBoxes, newBox)
+    if array.size(fvgBoxes) > 5
+        box.delete(array.shift(fvgBoxes))
+    lblText   = i_showConfLabel and i_showAdaptive ? 'FVG' + f_confStr(conf_FVG, total_FVG) : 'FVG'
+    label.new(bar_index - 1, math.avg(fvgTop, fvgBottom), lblText, style = label.style_label_right, color = color.new(#E040FB, 85), textcolor = #E040FB, size = size.tiny)
+    f_record(3, -1)
+
+if array.size(fvgBoxes) > 0
+    for i = array.size(fvgBoxes) - 1 to 0 by 1
+        b       = array.get(fvgBoxes, i)
+        bTop    = box.get_top(b)
+        bBottom = box.get_bottom(b)
+        if close >= bBottom and close <= bTop or high >= bBottom and low <= bTop
+            box.set_right(b, bar_index)
+            box.set_border_color(b, color.new(color.gray, 80))
+            box.set_bgcolor(b, color.new(color.gray, 95))
+            array.remove(fvgBoxes, i)
+        else
+            box.set_right(b, bar_index + 20)
+
+// ---- 2. ORDER BLOCKS --------------------------------------------------------------------------
+
+var array<box>  obBoxes    = array.new_box()
+var array<bool> obIsBull   = array.new_bool()
+var array<bool> obMitigated = array.new_bool()
+
+bullOB   = i_showOB and bearCandle[1] and bullCandle and close - open > ta.atr(i_obLookback) * 0.5 and close > high[1]
+bearOB   = i_showOB and bullCandle[1] and bearCandle and open - close > ta.atr(i_obLookback) * 0.5 and close < low[1]
+
+conf_OB  = f_confidence(2)
+total_OB = array.get(sig_total, 2)
+
+if bullOB
+    boxCol  = i_showAdaptive ? f_boxColor(i_bullOBColor, conf_OB) : i_bullOBColor
+    newOB   = box.new(bar_index - 1, math.max(open[1], close[1]), bar_index + 30, math.min(open[1], close[1]), border_color = color.new(#00E5FF, 80), bgcolor = boxCol, border_width = 1)
+    array.push(obBoxes, newOB)
+    array.push(obIsBull, true)
+    array.push(obMitigated, false)
+    lblText = i_showConfLabel and i_showAdaptive ? 'OB' + f_confStr(conf_OB, total_OB) : 'OB'
+    label.new(bar_index - 1, math.max(open[1], close[1]), lblText, style = label.style_label_down, color = color.new(#00E5FF, 85), textcolor = #00E5FF, size = size.tiny)
+    f_record(2, 1)
+
+if bearOB
+    boxCol  = i_showAdaptive ? f_boxColor(i_bearOBColor, conf_OB) : i_bearOBColor
+    newOB   = box.new(bar_index - 1, math.max(open[1], close[1]), bar_index + 30, math.min(open[1], close[1]), border_color = color.new(#FF1744, 80), bgcolor = boxCol, border_width = 1)
+    array.push(obBoxes, newOB)
+    array.push(obIsBull, false)
+    array.push(obMitigated, false)
+    lblText = i_showConfLabel and i_showAdaptive ? 'OB' + f_confStr(conf_OB, total_OB) : 'OB'
+    label.new(bar_index - 1, math.min(open[1], close[1]), lblText, style = label.style_label_up, color = color.new(#FF1744, 85), textcolor = #FF1744, size = size.tiny)
+    f_record(2, -1)
+
+if array.size(obBoxes) > 0
+    for i = array.size(obBoxes) - 1 to 0 by 1
+        b           = array.get(obBoxes, i)
+        bTop        = box.get_top(b)
+        bBottom     = box.get_bottom(b)
+        isBull      = array.get(obIsBull, i)
+        isMitigated = array.get(obMitigated, i)
+        if not isMitigated and (isBull and low <= bTop and low >= bBottom or not isBull and high >= bBottom and high <= bTop)
+            array.set(obMitigated, i, true)
+            if i_showMitigatedOB
+                box.set_bgcolor(b, color.new(isBull ? #00e5ff : #ff1744, 97))
+                box.set_border_color(b, color.new(isBull ? #00e5ff : #ff1744, 85))
+                box.set_border_width(b, 1)
+                box.set_border_style(b, line.style_dashed)
+            else
+                box.delete(b)
+                array.remove(obBoxes, i)
+                array.remove(obIsBull, i)
+                array.remove(obMitigated, i)
+        else
+            box.set_right(b, bar_index + 30)
+
+// ---- 3. BREAKER BLOCKS ------------------------------------------------------------------------
+
+if i_showBB and array.size(obBoxes) > 0
+    for i = array.size(obBoxes) - 1 to 0 by 1
+        if i < array.size(obMitigated) and array.get(obMitigated, i)
+            b      = array.get(obBoxes, i)
+            bTop   = box.get_top(b)
+            bBott  = box.get_bottom(b)
+            isBull = array.get(obIsBull, i)
+            if isBull and close < bBott
+                box.set_bgcolor(b, i_bearBBColor)
+                box.set_border_color(b, color.new(#e91e63, 50))
+            else if not isBull and close > bTop
+                box.set_bgcolor(b, i_bullBBColor)
+                box.set_border_color(b, color.new(#00bcd4, 50))
+
+// ---- 4. MARKET STRUCTURE: BOS & CHoCH ---------------------------------------------------------
+
+swingHigh = ta.pivothigh(high, i_bosLookback, i_bosLookback)
+swingLow  = ta.pivotlow(low,  i_bosLookback, i_bosLookback)
+
+var float lastSwingHigh    = na
+var float lastSwingLow     = na
+var int   lastSwingHighBar = na
+var int   lastSwingLowBar  = na
+var bool  upTrend          = true
+
+if not na(swingHigh)
+    lastSwingHigh    := swingHigh
+    lastSwingHighBar := bar_index - i_bosLookback
+    lastSwingHighBar
+
+if not na(swingLow)
+    lastSwingLow    := swingLow
+    lastSwingLowBar := bar_index - i_bosLookback
+    lastSwingLowBar
+
+bosBull   = i_showBOS   and upTrend      and not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+bosBear   = i_showBOS   and not upTrend  and not na(lastSwingLow)  and close < lastSwingLow  and close[1] >= lastSwingLow
+chochBull = i_showCHoCH and not upTrend  and not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+chochBear = i_showCHoCH and upTrend      and not na(lastSwingLow)  and close < lastSwingLow  and close[1] >= lastSwingLow
+
+if bosBull or chochBull
+    upTrend := true
+    upTrend
+if bosBear or chochBear
+    upTrend := false
+    upTrend
+
+conf_BOS    = f_confidence(0)
+total_BOS   = array.get(sig_total, 0)
+conf_CHOCH  = f_confidence(1)
+total_CHOCH = array.get(sig_total, 1)
+
+if bosBull
+    lblText = i_showConfLabel and i_showAdaptive ? 'BOS' + f_confStr(conf_BOS, total_BOS) : 'BOS'
+    line.new(lastSwingHighBar, lastSwingHigh, bar_index, lastSwingHigh, color = color.new(#00BFA5, 0), width = 2, style = line.style_solid)
+    label.new(bar_index, lastSwingHigh, lblText, style = label.style_label_left, color = color.new(#00BFA5, 85), textcolor = #00BFA5, size = size.tiny)
+    f_record(0, 1)
+
+if bosBear
+    lblText = i_showConfLabel and i_showAdaptive ? 'BOS' + f_confStr(conf_BOS, total_BOS) : 'BOS'
+    line.new(lastSwingLowBar, lastSwingLow, bar_index, lastSwingLow, color = color.new(#E040FB, 0), width = 2, style = line.style_solid)
+    label.new(bar_index, lastSwingLow, lblText, style = label.style_label_left, color = color.new(#E040FB, 85), textcolor = #E040FB, size = size.tiny)
+    f_record(0, -1)
+
+if chochBull
+    lblText = i_showConfLabel and i_showAdaptive ? 'CHoCH' + f_confStr(conf_CHOCH, total_CHOCH) : 'CHoCH'
+    line.new(lastSwingHighBar, lastSwingHigh, bar_index, lastSwingHigh, color = color.new(#76FF03, 0), width = 2, style = line.style_solid)
+    label.new(bar_index, lastSwingHigh, lblText, style = label.style_label_left, color = color.new(#76FF03, 85), textcolor = #76FF03, size = size.tiny)
+    f_record(1, 1)
+
+if chochBear
+    lblText = i_showConfLabel and i_showAdaptive ? 'CHoCH' + f_confStr(conf_CHOCH, total_CHOCH) : 'CHoCH'
+    line.new(lastSwingLowBar, lastSwingLow, bar_index, lastSwingLow, color = color.new(#00E5FF, 0), width = 2, style = line.style_solid)
+    label.new(bar_index, lastSwingLow, lblText, style = label.style_label_left, color = color.new(#00E5FF, 85), textcolor = #00E5FF, size = size.tiny)
+    f_record(1, -1)
+
+// ---- 5. LIQUIDITY SWEEPS ----------------------------------------------------------------------
+
+recentHigh = ta.highest(high[1], i_liqLookback)
+recentLow  = ta.lowest(low[1],  i_liqLookback)
+
+bslSweep = i_showLiq and high > recentHigh and close < recentHigh
+sslSweep = i_showLiq and low  < recentLow  and close > recentLow
+
+conf_LIQ  = f_confidence(4)
+total_LIQ = array.get(sig_total, 4)
+
+if bslSweep
+    lblText = i_showConfLabel and i_showAdaptive ? 'SwMp' + f_confStr(conf_LIQ, total_LIQ) : 'SwMp'
+    line.new(bar_index, recentHigh, bar_index, high, color = color.new(#FF6B35, 0), width = 2)
+    label.new(bar_index, high, lblText, style = label.style_label_down, color = color.new(#FF6B35, 80), textcolor = #FF6B35, size = size.tiny)
+    f_record(4, -1)
+
+if sslSweep
+    lblText = i_showConfLabel and i_showAdaptive ? 'SwMp' + f_confStr(conf_LIQ, total_LIQ) : 'SwMp'
+    line.new(bar_index, recentLow, bar_index, low, color = color.new(#FF6B35, 0), width = 2)
+    label.new(bar_index, low, lblText, style = label.style_label_up, color = color.new(#FF6B35, 80), textcolor = #FF6B35, size = size.tiny)
+    f_record(4, 1)
+
+// ---- 6. EQUAL HIGHS / EQUAL LOWS --------------------------------------------------------------
+
+eqTolerance  = i_eqThresh / 100
+eqhHasValues = not na(swingHigh) and not na(lastSwingHigh)
+eqhDiffOk    = eqhHasValues and math.abs(swingHigh - lastSwingHigh) / lastSwingHigh < eqTolerance
+eqhDiffBar   = bar_index - i_bosLookback != lastSwingHighBar
+eqhCondition = i_showEQ and eqhHasValues and eqhDiffOk and eqhDiffBar
+eqlHasValues = not na(swingLow) and not na(lastSwingLow)
+eqlDiffOk    = eqlHasValues and math.abs(swingLow - lastSwingLow) / lastSwingLow < eqTolerance
+eqlDiffBar   = bar_index - i_bosLookback != lastSwingLowBar
+eqlCondition = i_showEQ and eqlHasValues and eqlDiffOk and eqlDiffBar
+
+if eqhCondition
+    line.new(lastSwingHighBar, lastSwingHigh, bar_index - i_bosLookback, swingHigh, color = i_eqhColor, width = 1, style = line.style_dotted)
+    label.new(bar_index - i_bosLookback, swingHigh, 'EQH 📊', style = label.style_label_down, color = color.new(i_eqhColor, 60), textcolor = color.white, size = size.tiny)
+
+if eqlCondition
+    line.new(lastSwingLowBar, lastSwingLow, bar_index - i_bosLookback, swingLow, color = i_eqlColor, width = 1, style = line.style_dotted)
+    label.new(bar_index - i_bosLookback, swingLow, 'EQL 📊', style = label.style_label_up, color = color.new(i_eqlColor, 60), textcolor = color.white, size = size.tiny)
+
+// ---- 7. PREMIUM & DISCOUNT ZONES --------------------------------------------------------------
+
+pdHigh   = ta.highest(high, i_pdLookback)
+pdLow    = ta.lowest(low,  i_pdLookback)
+pdMid    = math.avg(pdHigh, pdLow)
+pdEqHigh = pdMid + (pdHigh - pdLow) * 0.05
+pdEqLow  = pdMid - (pdHigh - pdLow) * 0.05
+
+if i_showPD and barstate.islast
+    box.new(bar_index - i_pdLookback, pdHigh, bar_index + 5, pdEqHigh, border_color = color.new(#e91e63, 70), bgcolor = i_premColor)
+    box.new(bar_index - i_pdLookback, pdEqHigh, bar_index + 5, pdEqLow, border_color = color.new(#9c27b0, 70), bgcolor = i_eqColor)
+    box.new(bar_index - i_pdLookback, pdEqLow, bar_index + 5, pdLow, border_color = color.new(#26a69a, 70), bgcolor = i_discColor)
+    label.new(bar_index + 5, pdHigh, 'Premium', style = label.style_label_left, color = color.new(#e91e63, 70), textcolor = color.white, size = size.tiny)
+    label.new(bar_index + 5, pdMid, 'EQ', style = label.style_label_left, color = color.new(#9c27b0, 70), textcolor = color.white, size = size.tiny)
+    label.new(bar_index + 5, pdLow, 'Discount', style = label.style_label_left, color = color.new(#26a69a, 70), textcolor = color.white, size = size.tiny)
+
+// ---- 8. ICT KILL ZONES ------------------------------------------------------------------------
+
+sessionAsian  = timeframe.isintraday ? time(timeframe.period, '0000-0400:1234567') : na
+sessionLondon = timeframe.isintraday ? time(timeframe.period, '0700-1000:1234567') : na
+sessionNY     = timeframe.isintraday ? time(timeframe.period, '1300-1600:1234567') : na
+
+inAsian  = not na(sessionAsian)
+inLondon = not na(sessionLondon)
+inNY     = not na(sessionNY)
+
+conf_KZ_Asian  = f_confidence(5)
+conf_KZ_London = f_confidence(6)
+conf_KZ_NY     = f_confidence(7)
+
+isFirstAsianBar  = i_showKZ and inAsian  and na(sessionAsian[1])
+isFirstLondonBar = i_showKZ and inLondon and na(sessionLondon[1])
+isFirstNYBar     = i_showKZ and inNY     and na(sessionNY[1])
+
+if isFirstAsianBar
+    f_record(5, upTrend ? 1 : -1)
+if isFirstLondonBar
+    f_record(6, upTrend ? 1 : -1)
+if isFirstNYBar
+    f_record(7, upTrend ? 1 : -1)
+
+bestKZConf   = math.max(conf_KZ_Asian, math.max(conf_KZ_London, conf_KZ_NY))
+asianBright  = i_showAdaptive and conf_KZ_Asian  >= bestKZConf - 0.05
+londonBright = i_showAdaptive and conf_KZ_London >= bestKZConf - 0.05
+nyBright     = i_showAdaptive and conf_KZ_NY     >= bestKZConf - 0.05
+
+asianBgColor  = inAsian  ? (asianBright  ? i_asianKZColor  : color.new(#9c27b0, 96)) : na
+londonBgColor = inLondon ? (londonBright ? i_londonKZColor : color.new(#2196f3, 96)) : na
+nyBgColor     = inNY     ? (nyBright     ? i_nyKZColor     : color.new(#ff9800, 96)) : na
+
+bgcolor(i_showKZ ? asianBgColor  : na, title = 'Asian Kill Zone')
+bgcolor(i_showKZ ? londonBgColor : na, title = 'London Kill Zone')
+bgcolor(i_showKZ ? nyBgColor     : na, title = 'NY Kill Zone')
+
+if isFirstAsianBar
+    total_kzA = array.get(sig_total, 5)
+    lblText   = i_showConfLabel and i_showAdaptive ? 'Asian KZ' + f_confStr(conf_KZ_Asian, total_kzA) : 'Asian KZ 🌙'
+    label.new(bar_index, high, lblText, style = label.style_label_down, color = color.new(#9c27b0, 60), textcolor = color.white, size = size.tiny)
+
+if isFirstLondonBar
+    total_kzL = array.get(sig_total, 6)
+    lblText   = i_showConfLabel and i_showAdaptive ? 'London KZ' + f_confStr(conf_KZ_London, total_kzL) : 'London KZ'
+    label.new(bar_index, high, lblText, style = label.style_label_down, color = color.new(#2196f3, 60), textcolor = color.white, size = size.tiny)
+
+if isFirstNYBar
+    total_kzN = array.get(sig_total, 7)
+    lblText   = i_showConfLabel and i_showAdaptive ? 'NY KZ' + f_confStr(conf_KZ_NY, total_kzN) : 'NY KZ'
+    label.new(bar_index, high, lblText, style = label.style_label_down, color = color.new(#ff9800, 60), textcolor = color.white, size = size.tiny)
+
+// ---- 9. POWER OF 3 (AMD) ----------------------------------------------------------------------
+
+amdAccumulation = i_showPO3 and math.abs(close - open) < ta.atr(14) * 0.3 and math.abs(high - low) < ta.atr(14) * 0.6
+amdManipulation = i_showPO3 and (bslSweep or sslSweep)
+amdDistribution = i_showPO3 and (bosBull or bosBear)
+
+if amdAccumulation
+    label.new(bar_index, low, 'A', style = label.style_label_up, color = color.new(#607d8b, 70), textcolor = color.white, size = size.tiny, tooltip = 'PO3: Accumulation Phase')
+if amdManipulation
+    label.new(bar_index, bslSweep ? high : low, 'M', style = bslSweep ? label.style_label_down : label.style_label_up, color = color.new(#ff5722, 70), textcolor = color.white, size = size.tiny, tooltip = 'PO3: Manipulation Phase - Liquidity Grab')
+if amdDistribution
+    label.new(bar_index, bosBull ? high : low, 'D', style = bosBull ? label.style_label_down : label.style_label_up, color = color.new(#8bc34a, 70), textcolor = color.white, size = size.tiny, tooltip = 'PO3: Distribution Phase - Real Move')
+
+// ================================================================================================== //
+// --- STRATEGY EXECUTION ENGINE ----------------------------------------------------------------- //
+// ================================================================================================== //
+
+// Kill Zone active check
+kzActive = (i_kzAsian and inAsian) or (i_kzLondon and inLondon) or (i_kzNY and inNY)
+kzOk     = not i_kzFilter or kzActive
+
+// Premium/Discount zone check
+inDiscount = close < pdEqLow
+inPremium  = close > pdEqHigh
+
+// Confidence gate helpers
+confOk_BOS   = not i_confGate or conf_BOS   >= i_highConfThresh / 100.0
+confOk_CHOCH = not i_confGate or conf_CHOCH >= i_highConfThresh / 100.0
+confOk_OB    = not i_confGate or conf_OB    >= i_highConfThresh / 100.0
+confOk_FVG   = not i_confGate or conf_FVG   >= i_highConfThresh / 100.0
+confOk_LIQ   = not i_confGate or conf_LIQ   >= i_highConfThresh / 100.0
+
+// PD zone checks per direction
+pdLongOk  = not i_pdFilter or inDiscount
+pdShortOk = not i_pdFilter or inPremium
+
+// --- NEW v2: HTF Bias filter ---
+htfLongOk  = not i_useHTFBias or htfBullish
+htfShortOk = not i_useHTFBias or htfBearish
+
+// --- NEW v2: PDH/PDL sweep confirmation ---
+// Long requires PDL swept today (stop hunt below prior day low before longs)
+// Short requires PDH swept today (stop hunt above prior day high before shorts)
+pdhSweptOk = not i_usePDHPDL or pdhSweptToday
+pdlSweptOk = not i_usePDHPDL or pdlSweptToday
+
+// Composite long/short signals (with v2 filters added)
+longSignal  = kzOk and canTrade and htfLongOk and pdlSweptOk and (
+     (i_useBOS   and bosBull   and confOk_BOS   and pdLongOk)  or
+     (i_useCHoCH and chochBull and confOk_CHOCH and pdLongOk)  or
+     (i_useOB    and bullOB    and confOk_OB    and pdLongOk)   or
+     (i_useFVG   and bullFVG   and confOk_FVG   and pdLongOk)   or
+     (i_useSweep and sslSweep  and confOk_LIQ   and pdLongOk))
+
+shortSignal = kzOk and canTrade and htfShortOk and pdhSweptOk and (
+     (i_useBOS   and bosBear   and confOk_BOS   and pdShortOk) or
+     (i_useCHoCH and chochBear and confOk_CHOCH and pdShortOk) or
+     (i_useOB    and bearOB    and confOk_OB    and pdShortOk)  or
+     (i_useFVG   and bearFVG   and confOk_FVG   and pdShortOk)  or
+     (i_useSweep and bslSweep  and confOk_LIQ   and pdShortOk))
+
+// ATR-based SL/TP distances
+atrVal   = baseATR
+slDist   = i_slATR  * atrVal
+tpDist   = i_tpATR  * atrVal
+tp1Dist  = i_tp1ATR * atrVal
+tp2Dist  = i_tp2ATR * atrVal
+trOffset = i_trailATR * atrVal
+
+// Entry logic — no pyramiding
+if longSignal and strategy.position_size == 0
+    strategy.entry('Long', strategy.long, comment = 'L')
+    label.new(bar_index, low, '🟢 BUY', color = color.new(#00E676, 0), style = label.style_label_up, textcolor = color.white, size = size.normal)
+    if i_useDualTP
+        strategy.exit('Long TP1', 'Long', limit = close + tp1Dist, qty_percent = 50,  comment = 'TP1')
+        strategy.exit('Long TP2', 'Long', limit = close + tp2Dist, stop  = close - slDist, comment = 'TP2/SL')
+    else if i_trailSL
+        strategy.exit('Long Exit', 'Long', trail_points = trOffset / syminfo.mintick, trail_offset = trOffset / syminfo.mintick)
+    else
+        strategy.exit('Long Exit', 'Long', stop = close - slDist, limit = close + tpDist)
+
+if shortSignal and strategy.position_size == 0
+    strategy.entry('Short', strategy.short, comment = 'S')
+    label.new(bar_index, high, '🔴 SELL', color = color.new(#FF1744, 0), style = label.style_label_down, textcolor = color.white, size = size.normal)
+    if i_useDualTP
+        strategy.exit('Short TP1', 'Short', limit = close - tp1Dist, qty_percent = 50,  comment = 'TP1')
+        strategy.exit('Short TP2', 'Short', limit = close - tp2Dist, stop  = close + slDist, comment = 'TP2/SL')
+    else if i_trailSL
+        strategy.exit('Short Exit', 'Short', trail_points = trOffset / syminfo.mintick, trail_offset = trOffset / syminfo.mintick)
+    else
+        strategy.exit('Short Exit', 'Short', stop = close + slDist, limit = close - tpDist)
+
+// ================================================================================================== //
+// --- DASHBOARDS -------------------------------------------------------------------------------- //
+// ================================================================================================== //
+
+f_wr(idx) =>
+    t = array.get(sig_total, idx)
+    w = array.get(sig_wins, idx)
+    t < 3 ? 'new' : str.tostring(math.round(w / t * 100)) + '%'
+
+f_wrColor(idx) =>
+    t = array.get(sig_total, idx)
+    if t < 3
+        color.gray
+    else
+        score = array.get(sig_wins, idx) / t
+        score >= i_highConfThresh / 100.0 ? color.new(#4caf50, 0) : score >= i_lowConfThresh / 100.0 ? color.orange : color.new(color.gray, 40)
+
+// --- ICT/SMC Signal Dashboard (top right) — expanded with v2 rows ---
+// Rows: header, Trend, BOS, CHoCH, Liq Sweep, FVG, Order Block, PD Zone, Kill Zone, EQH/EQL, ATR Ratio
+//       + HTF Bias, PDH/PDL, Loss Streak, Trade Status  => 15 rows total
+var table dash = table.new(position.top_right, 2, 15, border_width = 1, border_color = color.new(#00D9FF, 50), frame_color = color.new(#00D9FF, 50), frame_width = 1)
+
+if barstate.islast
+    table.cell(dash, 0, 0, '⚡ ICT/SMC', text_color = color.new(#00F5FF, 0), bgcolor = color.new(#1A1F3A, 30), text_size = size.small, text_halign = text.align_center)
+    table.cell(dash, 1, 0, 'Status',     text_color = color.new(#00D9FF, 40), bgcolor = color.new(#1A1F3A, 30), text_size = size.small, text_halign = text.align_center)
+    table.cell(dash, 0, 1, 'Trend',      text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 1, 1, upTrend ? '▲ Bullish' : '▼ Bearish', text_color = upTrend ? color.new(#76FF03, 0) : color.new(#FF1744, 0), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 0, 2, 'BOS',        text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    table.cell(dash, 1, 2, bosBull ? 'Bull ▲' : bosBear ? 'Bear ▼' : '-', text_color = bosBull ? color.new(#00BFA5, 0) : bosBear ? color.new(#E040FB, 0) : color.new(#8B93FF, 50), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    table.cell(dash, 0, 3, 'CHoCH',      text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 1, 3, chochBull ? 'Bull ▲' : chochBear ? 'Bear ▼' : '-', text_color = chochBull ? color.new(#76FF03, 0) : chochBear ? color.new(#00E5FF, 0) : color.new(#8B93FF, 50), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 0, 4, 'Liq Sweep',  text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    table.cell(dash, 1, 4, bslSweep ? 'BSL ▲' : sslSweep ? 'SSL ▼' : '-', text_color = bslSweep ? color.new(#FF6B35, 0) : sslSweep ? color.new(#FF6B35, 0) : color.new(#8B93FF, 50), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    table.cell(dash, 0, 5, 'FVG',        text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 1, 5, bullFVG ? 'Bull' : bearFVG ? 'Bear' : '-', text_color = bullFVG ? color.new(#76FF03, 0) : bearFVG ? color.new(#E040FB, 0) : color.new(#8B93FF, 50), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 0, 6, 'Order Block',text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    table.cell(dash, 1, 6, bullOB ? 'Bull OB' : bearOB ? 'Bear OB' : '-', text_color = bullOB ? color.new(#00E5FF, 0) : bearOB ? color.new(#FF1744, 0) : color.new(#8B93FF, 50), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    pdZone      = close > pdEqHigh ? 'Premium' : close < pdEqLow ? 'Discount' : 'EQ'
+    pdZoneColor = close > pdEqHigh ? color.new(#FF1744, 0) : close < pdEqLow ? color.new(#00E676, 0) : color.new(#C77DFF, 0)
+    table.cell(dash, 0, 7, 'PD Zone',    text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 1, 7, pdZone,       text_color = pdZoneColor,            bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    kzActiveStr = inNY ? 'NY' : inLondon ? 'London' : inAsian ? 'Asian' : 'Off-Session'
+    kzColor     = inNY ? color.new(#FFB627, 0) : inLondon ? color.new(#00D9FF, 0) : inAsian ? color.new(#C77DFF, 0) : color.new(#8B93FF, 50)
+    table.cell(dash, 0, 8, 'Kill Zone',  text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    table.cell(dash, 1, 8, kzActiveStr,  text_color = kzColor,                bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    table.cell(dash, 0, 9, 'EQH/EQL',   text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 1, 9, eqhCondition ? 'EQH ⚠' : eqlCondition ? 'EQL ⚠' : '-', text_color = eqhCondition ? color.new(#00E676, 0) : eqlCondition ? color.new(#FF1744, 0) : color.new(#8B93FF, 50), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 0, 10, 'ATR Ratio', text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    table.cell(dash, 1, 10, str.tostring(math.round(atrRatio * 100) / 100) + 'x', text_color = atrRatio > 1.2 ? color.new(#FF1744, 0) : atrRatio < 0.8 ? color.new(#00E5FF, 0) : color.new(#8B93FF, 30), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    // --- v2 rows ---
+    table.cell(dash, 0, 11, 'HTF Bias',   text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 1, 11, htfBullish ? '4H Bull ▲' : '4H Bear ▼', text_color = htfBullish ? color.new(#76FF03, 0) : color.new(#FF1744, 0), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 0, 12, 'PDH/PDL',    text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    table.cell(dash, 1, 12, (pdhSweptToday ? 'PDH ✓' : 'PDH –') + ' / ' + (pdlSweptToday ? 'PDL ✓' : 'PDL –'), text_color = pdhSweptToday or pdlSweptToday ? color.new(#FFB627, 0) : color.new(#8B93FF, 50), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    table.cell(dash, 0, 13, 'Loss Streak',text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 1, 13, str.tostring(lossStreakCount) + ' / ' + str.tostring(i_maxLossStreak), text_color = lossStreakCount >= i_maxLossStreak ? color.new(#FF1744, 0) : lossStreakCount > 0 ? color.new(#FFB627, 0) : color.new(#00E676, 0), bgcolor = color.new(#0A0E27, 50), text_size = size.tiny)
+    table.cell(dash, 0, 14, 'Trade Status',text_color = color.new(#8B93FF, 30), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+    table.cell(dash, 1, 14, canTrade ? '● ACTIVE' : '■ PAUSED', text_color = canTrade ? color.new(#00E676, 0) : color.new(#FF1744, 0), bgcolor = color.new(#0F1629, 40), text_size = size.tiny)
+
+// --- Adaptive Learning Dashboard (bottom right) ---
+var table learnDash = table.new(position.bottom_right, 3, 11, border_width = 1, border_color = color.new(#E040FB, 50), frame_color = color.new(#E040FB, 50), frame_width = 1)
+
+if barstate.islast and i_showLearnDash and i_showAdaptive
+    table.cell(learnDash, 0, 0, 'Signal',   text_color = color.new(#00F5FF, 0),  bgcolor = color.new(#1A1F3A, 30), text_size = size.tiny, text_halign = text.align_left)
+    table.cell(learnDash, 1, 0, 'W/T',      text_color = color.new(#00D9FF, 40), bgcolor = color.new(#1A1F3A, 30), text_size = size.tiny, text_halign = text.align_center)
+    table.cell(learnDash, 2, 0, 'Conf',     text_color = color.new(#00D9FF, 40), bgcolor = color.new(#1A1F3A, 30), text_size = size.tiny, text_halign = text.align_center)
+
+    t0 = array.get(sig_total, 0)
+    w0 = array.get(sig_wins, 0)
+    table.cell(learnDash, 0, 1, 'BOS',      text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 1, 1, str.tostring(int(w0)) + '/' + str.tostring(int(t0)), text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 2, 1, f_wr(0),    text_color = f_wrColor(0), bgcolor = color.new(color.black, 75), text_size = size.tiny)
+
+    t1 = array.get(sig_total, 1)
+    w1 = array.get(sig_wins, 1)
+    table.cell(learnDash, 0, 2, 'CHoCH',    text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 1, 2, str.tostring(int(w1)) + '/' + str.tostring(int(t1)), text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 2, 2, f_wr(1),    text_color = f_wrColor(1), bgcolor = color.new(color.black, 75), text_size = size.tiny)
+
+    t2 = array.get(sig_total, 2)
+    w2 = array.get(sig_wins, 2)
+    table.cell(learnDash, 0, 3, 'OB',       text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 1, 3, str.tostring(int(w2)) + '/' + str.tostring(int(t2)), text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 2, 3, f_wr(2),    text_color = f_wrColor(2), bgcolor = color.new(color.black, 75), text_size = size.tiny)
+
+    t3 = array.get(sig_total, 3)
+    w3 = array.get(sig_wins, 3)
+    table.cell(learnDash, 0, 4, 'FVG',      text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 1, 4, str.tostring(int(w3)) + '/' + str.tostring(int(t3)), text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 2, 4, f_wr(3),    text_color = f_wrColor(3), bgcolor = color.new(color.black, 75), text_size = size.tiny)
+
+    t4 = array.get(sig_total, 4)
+    w4 = array.get(sig_wins, 4)
+    table.cell(learnDash, 0, 5, 'Liq Sweep',text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 1, 5, str.tostring(int(w4)) + '/' + str.tostring(int(t4)), text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 2, 5, f_wr(4),    text_color = f_wrColor(4), bgcolor = color.new(color.black, 75), text_size = size.tiny)
+
+    t5 = array.get(sig_total, 5)
+    w5 = array.get(sig_wins, 5)
+    table.cell(learnDash, 0, 6, 'KZ Asian',  text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 1, 6, str.tostring(int(w5)) + '/' + str.tostring(int(t5)), text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 2, 6, f_wr(5),     text_color = f_wrColor(5), bgcolor = color.new(color.black, 75), text_size = size.tiny)
+
+    t6 = array.get(sig_total, 6)
+    w6 = array.get(sig_wins, 6)
+    table.cell(learnDash, 0, 7, 'KZ London', text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 1, 7, str.tostring(int(w6)) + '/' + str.tostring(int(t6)), text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 2, 7, f_wr(6),     text_color = f_wrColor(6), bgcolor = color.new(color.black, 75), text_size = size.tiny)
+
+    t7 = array.get(sig_total, 7)
+    w7 = array.get(sig_wins, 7)
+    table.cell(learnDash, 0, 8, 'KZ NY',     text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 1, 8, str.tostring(int(w7)) + '/' + str.tostring(int(t7)), text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 2, 8, f_wr(7),     text_color = f_wrColor(7), bgcolor = color.new(color.black, 75), text_size = size.tiny)
+
+    table.cell(learnDash, 0, 9,  'ATR Mode',  text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 1, 9,  i_adaptiveATR ? 'Adaptive' : 'Fixed', text_color = i_adaptiveATR ? color.teal : color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+    table.cell(learnDash, 2, 9,  str.tostring(math.round(adaptiveMult * 100) / 100) + 'x', text_color = color.gray, bgcolor = color.new(color.black, 75), text_size = size.tiny)
+
+    maxW = math.max(array.get(sig_wins, 0) / math.max(array.get(sig_total, 0), 1),
+         math.max(array.get(sig_wins, 1) / math.max(array.get(sig_total, 1), 1),
+         math.max(array.get(sig_wins, 2) / math.max(array.get(sig_total, 2), 1),
+         math.max(array.get(sig_wins, 3) / math.max(array.get(sig_total, 3), 1),
+                  array.get(sig_wins, 4) / math.max(array.get(sig_total, 4), 1)))))
+    bestSig = array.get(sig_wins, 0) / math.max(array.get(sig_total, 0), 1) >= maxW ? 'BOS' :
+              array.get(sig_wins, 1) / math.max(array.get(sig_total, 1), 1) >= maxW ? 'CHoCH' :
+              array.get(sig_wins, 2) / math.max(array.get(sig_total, 2), 1) >= maxW ? 'OB' :
+              array.get(sig_wins, 3) / math.max(array.get(sig_total, 3), 1) >= maxW ? 'FVG' : 'Sweep'
+    table.cell(learnDash, 0, 10, 'Best Sig',  text_color = color.gray, bgcolor = color.new(#0d1b2a, 20), text_size = size.tiny)
+    table.cell(learnDash, 1, 10, bestSig,     text_color = color.new(#4caf50, 0), bgcolor = color.new(#0d1b2a, 20), text_size = size.tiny)
+    table.cell(learnDash, 2, 10, str.tostring(math.round(maxW * 100)) + '%', text_color = color.new(#4caf50, 0), bgcolor = color.new(#0d1b2a, 20), text_size = size.tiny)
+
+// ================================================================================================== //
+// --- ALERTS ------------------------------------------------------------------------------------ //
+// ================================================================================================== //
+
+priceTxt  = str.tostring(close, format.mintick)
+tickerTxt = syminfo.ticker
+
+if ta.cross(close, priceLowest + (pocLevel + .50) * priceStep) and pointOfControl
+    alert(tickerTxt + ' Volume Profile : Price touches/crosses Point Of Control Line, price ' + priceTxt)
+if ta.cross(close, priceLowest + (levelAbovePoc + 1.00) * priceStep) and valueAreaHigh
+    alert(tickerTxt + ' Volume Profile : Price touches/crosses Value Area High Line, price ' + priceTxt)
+if ta.cross(close, priceLowest + (levelBelowPoc + 0.00) * priceStep) and valueAreaLow
+    alert(tickerTxt + ' Volume Profile : Price touches/crosses Value Area Low Line, price ' + priceTxt)
+if nzVolume > i_vSMA * i_vwcbHighThresh and i_vwcb
+    alert(tickerTxt + ' High Volume, price ' + priceTxt)
+if nzVolume > i_vSMA * i_vSpikeThresh and i_vSpikeLb
+    alert(tickerTxt + ' Volume Spike : sign of exhaustion, price ' + priceTxt)
+if ta.crossover(range_1, weightedATR) and i_hATRLb
+    alert(tickerTxt + ' High Volatility detected, price ' + priceTxt)
+
+confStr(idx) =>
+    c = f_confidence(idx)
+    t = array.get(sig_total, idx)
+    t < 3 ? '[new]' : '[' + str.tostring(math.round(c * 100)) + '%]'
+
+if bullFVG
+    alert(tickerTxt + ' Bull FVG ' + confStr(3) + ' price ' + priceTxt, alert.freq_once_per_bar)
+if bearFVG
+    alert(tickerTxt + ' Bear FVG ' + confStr(3) + ' price ' + priceTxt, alert.freq_once_per_bar)
+if bullOB
+    alert(tickerTxt + ' Bull OB ' + confStr(2) + ' price ' + priceTxt, alert.freq_once_per_bar)
+if bearOB
+    alert(tickerTxt + ' Bear OB ' + confStr(2) + ' price ' + priceTxt, alert.freq_once_per_bar)
+if bosBull
+    alert(tickerTxt + ' BOS Bull ▲ ' + confStr(0) + ' price ' + priceTxt, alert.freq_once_per_bar)
+if bosBear
+    alert(tickerTxt + ' BOS Bear ▼ ' + confStr(0) + ' price ' + priceTxt, alert.freq_once_per_bar)
+if chochBull
+    alert(tickerTxt + ' CHoCH Bull ▲ ' + confStr(1) + ' price ' + priceTxt, alert.freq_once_per_bar)
+if chochBear
+    alert(tickerTxt + ' CHoCH Bear ▼ ' + confStr(1) + ' price ' + priceTxt, alert.freq_once_per_bar)
+if bslSweep
+    alert(tickerTxt + ' BSL Sweep ' + confStr(4) + ' price ' + priceTxt, alert.freq_once_per_bar)
+if sslSweep
+    alert(tickerTxt + ' SSL Sweep ' + confStr(4) + ' price ' + priceTxt, alert.freq_once_per_bar)
+if eqhCondition
+    alert(tickerTxt + ' EQH - liquidity pool above, price ' + priceTxt, alert.freq_once_per_bar)
+if eqlCondition
+    alert(tickerTxt + ' EQL - liquidity pool below, price ' + priceTxt, alert.freq_once_per_bar)
+if longSignal
+    alert(tickerTxt + ' STRATEGY LONG ENTRY ' + priceTxt, alert.freq_once_per_bar)
+if shortSignal
+    alert(tickerTxt + ' STRATEGY SHORT ENTRY ' + priceTxt, alert.freq_once_per_bar)
+
+// v2 kill switch alert
+if i_useLossStreak and lossStreakCount >= i_maxLossStreak and lossStreakCount[1] < i_maxLossStreak
+    alert(tickerTxt + ' ⛔ LOSS STREAK LIMIT HIT — Trading paused (' + str.tostring(lossStreakCount) + ' losses)', alert.freq_once_per_bar)
+
+// -- Logo --
+var table logo = table.new(position.bottom_center, 1, 1)
+if barstate.islast
+    table.cell(logo, 0, 0, '⚡ Sonnet 4.6 Adaptive ML Strategy v2 ☼☾', text_size = size.normal, text_color = color.new(#00F5FF, 0))
