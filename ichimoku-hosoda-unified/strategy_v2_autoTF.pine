@@ -1,0 +1,278 @@
+// by @troias
+//@version=6
+strategy('Ichimoku Kinko Hyo [Price + Wave + Time] (Hosoda Unified) Sonnet 4.6 Strategy @v6 · Auto-TF', overlay=true, max_bars_back=500, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.04, slippage=2)
+
+//────────────────────────────────────────────────────────────
+// AUTO TIMEFRAME DETECTION
+// timeframe.in_seconds() returns seconds in current TF bar
+// We map it to named zones for clean conditional logic
+//────────────────────────────────────────────────────────────
+_tfs = timeframe.in_seconds()
+
+// Timeframe zones (seconds)
+_is1m  = _tfs <= 60
+_is5m  = _tfs > 60    and _tfs <= 300
+_is15m = _tfs > 300   and _tfs <= 900
+_is30m = _tfs > 900   and _tfs <= 1800
+_is1h  = _tfs > 1800  and _tfs <= 3600
+_is4h  = _tfs > 3600  and _tfs <= 14400
+_is1d  = _tfs > 14400 and _tfs <= 86400
+_is1w  = _tfs > 86400 and _tfs <= 604800
+_is1mo = _tfs > 604800  // Monthly and above
+
+//────────────────────────────────────────────────────────────
+// AUTO DEFAULTS — derived from Hosoda theory + community research
+//────────────────────────────────────────────────────────────
+_autoTenkan = _is1m  ? 7  :
+              _is5m  ? 9  :
+              _is15m ? 9  :
+              _is30m ? 9  :
+              _is1h  ? 9  :
+              _is4h  ? 9  :
+              _is1d  ? 9  :
+              _is1w  ? 9  : 5   // Monthly
+
+_autoKijun  = _is1m  ? 22 :
+              _is5m  ? 26 :
+              _is15m ? 26 :
+              _is30m ? 26 :
+              _is1h  ? 26 :
+              _is4h  ? 26 :
+              _is1d  ? 26 :
+              _is1w  ? 26 : 13
+
+_autoSenkouB = _is1m  ? 44 :
+               _is5m  ? 52 :
+               _is15m ? 52 :
+               _is30m ? 52 :
+               _is1h  ? 52 :
+               _is4h  ? 52 :
+               _is1d  ? 52 :
+               _is1w  ? 52 : 26
+
+_autoDisplace = _is1m  ? 22 :
+                _is5m  ? 26 :
+                _is15m ? 26 :
+                _is30m ? 26 :
+                _is1h  ? 26 :
+                _is4h  ? 26 :
+                _is1d  ? 26 :
+                _is1w  ? 26 : 13
+
+_autoAtrLen  = _is1m  ? 10 :
+               _is5m  ? 12 :
+               _is15m ? 14 :
+               _is30m ? 14 :
+               _is1h  ? 14 :
+               _is4h  ? 14 :
+               _is1d  ? 14 :
+               _is1w  ? 14 : 10
+
+_autoSlMult  = _is1m  ? 1.0 :
+               _is5m  ? 1.2 :
+               _is15m ? 1.5 :
+               _is30m ? 1.5 :
+               _is1h  ? 1.5 :
+               _is4h  ? 2.0 :
+               _is1d  ? 2.0 :
+               _is1w  ? 2.5 : 3.0
+
+_autoTp1Mult = _is1m  ? 1.5 :
+               _is5m  ? 1.8 :
+               _is15m ? 2.0 :
+               _is30m ? 2.0 :
+               _is1h  ? 2.0 :
+               _is4h  ? 2.5 :
+               _is1d  ? 3.0 :
+               _is1w  ? 3.0 : 3.0
+
+_autoTp2Mult = _is1m  ? 3.0 :
+               _is5m  ? 3.5 :
+               _is15m ? 4.0 :
+               _is30m ? 4.5 :
+               _is1h  ? 5.0 :
+               _is4h  ? 5.0 :
+               _is1d  ? 6.0 :
+               _is1w  ? 7.0 : 8.0
+
+// Auto Time Cycle Filter — ON for 15M–1D, OFF for scalping & macro
+_autoTimeCycleFilter = _is15m or _is30m or _is1h or _is4h or _is1d
+
+// Auto Long Only — recommended for 1M (too noisy for shorts)
+_autoLongOnly = _is1m
+
+//────────────────────────────────────────────────────────────
+// INPUTS — Auto defaults shown; user can override
+//────────────────────────────────────────────────────────────
+grpAuto  = 'Auto Timeframe Settings'
+grpIchi  = 'Ichimoku Parameters'
+grpRisk  = 'Risk Management'
+grpMode  = 'Strategy Mode'
+grpTime  = 'Time Theory'
+
+useAutoTF = input.bool(true, '⚡ Auto-Adjust Inputs by Timeframe', group=grpAuto, tooltip='When ON, all Ichimoku & Risk inputs auto-adjust for the current chart timeframe. Turn OFF to use manual values.')
+
+// ── Ichimoku ──
+tenkanLen  = input.int(9,    'Tenkan-sen',    group=grpIchi, minval=1, tooltip='Auto: 7 (1M), 9 (5M–1W), 5 (Monthly)')
+kijunLen   = input.int(26,   'Kijun-sen',     group=grpIchi, minval=1)
+senkouLen  = input.int(52,   'Senkou Span B', group=grpIchi, minval=1)
+displace   = input.int(26,   'Displacement',  group=grpIchi, minval=1)
+
+// ── Risk ──
+atrLen     = input.int(14,   'ATR Length',           group=grpRisk, minval=1)
+slMult     = input.float(1.5,'Stop Loss ATR Mult',   group=grpRisk, step=0.1, minval=0.1)
+tp1Mult    = input.float(2.0,'Take Profit 1 ATR Mult',group=grpRisk, step=0.1, minval=0.1)
+tp2Mult    = input.float(4.0,'Take Profit 2 ATR Mult',group=grpRisk, step=0.1, minval=0.1)
+
+// ── Mode ──
+useLongOnly  = input.bool(false, 'Long Only',  group=grpMode)
+useShortOnly = input.bool(false, 'Short Only', group=grpMode)
+
+// ── Time Theory ──
+showTimeCycles     = input.bool(true,  'Show Time Cycle Markers',  group=grpTime)
+useTimeCycleFilter = input.bool(false, 'Require Time Cycle on Entry', group=grpTime)
+
+//────────────────────────────────────────────────────────────
+// RESOLVE — Auto vs Manual
+// When useAutoTF is ON, resolved values use auto defaults.
+// When OFF, resolved values use manual inputs above.
+//────────────────────────────────────────────────────────────
+rTenkan  = useAutoTF ? _autoTenkan  : tenkanLen
+rKijun   = useAutoTF ? _autoKijun   : kijunLen
+rSenkouB = useAutoTF ? _autoSenkouB : senkouLen
+rDisp    = useAutoTF ? _autoDisplace : displace
+rAtrLen  = useAutoTF ? _autoAtrLen  : atrLen
+rSlMult  = useAutoTF ? _autoSlMult  : slMult
+rTp1     = useAutoTF ? _autoTp1Mult : tp1Mult
+rTp2     = useAutoTF ? _autoTp2Mult : tp2Mult
+rTCF     = useAutoTF ? _autoTimeCycleFilter : useTimeCycleFilter
+rLongOnly= useAutoTF ? _autoLongOnly : useLongOnly
+
+//────────────────────────────────────────────────────────────
+// TF LABEL — shows active resolved settings on chart
+//────────────────────────────────────────────────────────────
+tfName = _is1m  ? '1M'  :
+         _is5m  ? '5M'  :
+         _is15m ? '15M' :
+         _is30m ? '30M' :
+         _is1h  ? '1H'  :
+         _is4h  ? '4H'  :
+         _is1d  ? '1D'  :
+         _is1w  ? '1W'  : '1MO'
+
+if barstate.islast and useAutoTF
+    label.new(bar_index, high,
+     '⚡ Auto-TF: ' + tfName + '\n' +
+     'T:' + str.tostring(rTenkan) + '  K:' + str.tostring(rKijun) + '  SB:' + str.tostring(rSenkouB) + '\n' +
+     'SL×' + str.tostring(rSlMult) + '  TP1×' + str.tostring(rTp1) + '  TP2×' + str.tostring(rTp2),
+     color=color.new(color.navy, 10), textcolor=color.white, style=label.style_label_lower_left, size=size.small)
+
+//────────────────────────────────────────────────────────────
+// ICHIMOKU CORE  (uses resolved params)
+//────────────────────────────────────────────────────────────
+tenkan = (ta.highest(high, rTenkan) + ta.lowest(low, rTenkan)) / 2
+kijun  = (ta.highest(high, rKijun)  + ta.lowest(low, rKijun))  / 2
+spanA  = (tenkan + kijun) / 2
+spanB  = (ta.highest(high, rSenkouB) + ta.lowest(low, rSenkouB)) / 2
+chikou = close
+
+//────────────────────────────────────────────────────────────
+// PLOTS
+//────────────────────────────────────────────────────────────
+plot(tenkan, color=color.red,    title='Tenkan-sen',  linewidth=1)
+plot(kijun,  color=color.blue,   title='Kijun-sen',   linewidth=1)
+spanAPlot = plot(spanA, offset=rDisp, color=color.green,  title='Senkou Span A')
+spanBPlot = plot(spanB, offset=rDisp, color=color.maroon, title='Senkou Span B')
+fill(spanAPlot, spanBPlot, color=spanA > spanB ? color.new(color.green, 80) : color.new(color.red, 80), title='Kumo')
+plot(chikou, offset=-rDisp, color=color.purple, title='Chikou Span', linewidth=1)
+
+//────────────────────────────────────────────────────────────
+// CHIKOU FREEDOM
+//────────────────────────────────────────────────────────────
+chikouFreeBull = close > high[rDisp]
+chikouFreeBear = close < low[rDisp]
+
+//────────────────────────────────────────────────────────────
+// PHASE CLASSIFICATION
+//────────────────────────────────────────────────────────────
+aboveKumo  = close > math.max(spanA, spanB)
+belowKumo  = close < math.min(spanA, spanB)
+insideKumo = not aboveKumo and not belowKumo
+phaseBull  = aboveKumo and tenkan > kijun
+phaseBear  = belowKumo and tenkan < kijun
+
+//────────────────────────────────────────────────────────────
+// HOSODA WAVE THEORY
+//────────────────────────────────────────────────────────────
+nWaveBull = close > kijun and kijun > kijun[1]
+nWaveBear = close < kijun and kijun < kijun[1]
+vWaveBull = ta.lowest(low, 3) == low  and close > close[1]
+vWaveBear = ta.highest(high, 3) == high and close < close[1]
+pWave     = insideKumo
+
+waveBullConfirm = nWaveBull or vWaveBull
+waveBearConfirm = nWaveBear or vWaveBear
+
+//────────────────────────────────────────────────────────────
+// STRONG SIGNAL — ALL THREE PILLARS REQUIRED
+//────────────────────────────────────────────────────────────
+strongBull = phaseBull and waveBullConfirm and chikouFreeBull
+strongBear = phaseBear and waveBearConfirm and chikouFreeBear
+
+//────────────────────────────────────────────────────────────
+// TIME THEORY CYCLES (HOSODA: 9, 17, 26, 33, 42, 65)
+//────────────────────────────────────────────────────────────
+isTimeCycle(n) => bar_index % n == 0
+timeCycle = isTimeCycle(9) or isTimeCycle(17) or isTimeCycle(26) or isTimeCycle(33) or isTimeCycle(42) or isTimeCycle(65)
+
+plotshape(showTimeCycles and timeCycle, title='Time Theory Cycle', location=location.bottom, style=shape.circle, size=size.tiny, color=color.new(color.blue, 0))
+
+//────────────────────────────────────────────────────────────
+// ATR
+//────────────────────────────────────────────────────────────
+atr = ta.atr(rAtrLen)
+
+//────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+// rLongOnly: auto-enabled on 1M (too noisy for shorts)
+// rTCF:      auto-enabled on 15M–1D (Time Cycle Filter)
+//────────────────────────────────────────────────────────────
+_tcfPass   = not rTCF or timeCycle   // Time cycle gate (passes when filter OFF, or cycle fires)
+longEntry  = strongBull and _tcfPass and not useShortOnly
+shortEntry = strongBear and _tcfPass and not rLongOnly and not useShortOnly
+
+//────────────────────────────────────────────────────────────
+// PHASE VISUALS
+//────────────────────────────────────────────────────────────
+plotshape(phaseBull, location=location.bottom, style=shape.circle, size=size.tiny, color=strongBull ? color.lime   : color.green,  title='Phase Bull')
+plotshape(phaseBear, location=location.top,    style=shape.circle, size=size.tiny, color=strongBear ? color.red    : color.maroon, title='Phase Bear')
+plotshape(pWave,     location=location.bottom, style=shape.circle, size=size.tiny, color=color.gray,                               title='P-Wave (Kumo)')
+
+//────────────────────────────────────────────────────────────
+// ENTRY & EXIT LOGIC
+//────────────────────────────────────────────────────────────
+
+// ── LONG ──
+if longEntry and strategy.position_size <= 0
+    longSL  = close - atr * rSlMult
+    longTP1 = close + atr * rTp1
+    longTP2 = close + atr * rTp2
+    strategy.entry('Long', strategy.long)
+    strategy.exit('Long TP1', 'Long', qty_percent=50,  limit=longTP1, stop=longSL, comment='TP1')
+    strategy.exit('Long TP2', 'Long', qty_percent=100, limit=longTP2, stop=longSL, comment='TP2')
+
+// ── SHORT ──
+if shortEntry and strategy.position_size >= 0
+    shortSL  = close + atr * rSlMult
+    shortTP1 = close - atr * rTp1
+    shortTP2 = close - atr * rTp2
+    strategy.entry('Short', strategy.short)
+    strategy.exit('Short TP1', 'Short', qty_percent=50,  limit=shortTP1, stop=shortSL, comment='TP1')
+    strategy.exit('Short TP2', 'Short', qty_percent=100, limit=shortTP2, stop=shortSL, comment='TP2')
+
+// ── SIGNAL FLIP CLOSE ──
+if strategy.position_size > 0 and strongBear
+    strategy.close('Long', comment='Bear Flip')
+
+if strategy.position_size < 0 and strongBull
+    strategy.close('Short', comment='Bull Flip')
